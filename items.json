@@ -1,0 +1,517 @@
+{
+  "9nd0": {
+    "name": "Призрачный кристалл",
+    "name_en": "Spectral Crystal",
+    "icon": "icons/9nd0.png"
+  },
+  "1k96": {
+    "name": "Трещотка",
+    "name_en": "Rattle",
+    "icon": "icons/1k96.png"
+  },
+  "gyn0": {
+    "name": "Комета",
+    "name_en": "Comet",
+    "icon": "icons/gyn0.png"
+  },
+  "zy32": {
+    "name": "Батарейка",
+    "name_en": "Battery",
+    "icon": "icons/zy32.png"
+  },
+  "5r5g": {
+    "name": "Ледяной ежик",
+    "name_en": "Ice Hedgehog",
+    "icon": "icons/5r5g.png"
+  },
+  "y54z": {
+    "name": "Гиря",
+    "name_en": "Kettlebell",
+    "icon": "icons/y54z.png"
+  },
+  "wg3p": {
+    "name": "Дезинтегратор",
+    "name_en": "Disintegrator",
+    "icon": "icons/wg3p.png"
+  },
+  "4lkp": {
+    "name": "Лампочка Ильича",
+    "name_en": "Ilyich Lamp",
+    "icon": "icons/4lkp.png"
+  },
+  "kqr0": {
+    "name": "Гелий",
+    "name_en": "Helium",
+    "icon": "icons/kqr0.png"
+  },
+  "qo06": {
+    "name": "Трансформатор",
+    "name_en": "Transformer",
+    "icon": "icons/qo06.png"
+  },
+  "lj0j": {
+    "name": "Катушка",
+    "name_en": "Coil",
+    "icon": "icons/lj0j.png"
+  },
+  "gy10": {
+    "name": "Красный кристалл",
+    "name_en": "Red Crystal",
+    "icon": "icons/gy10.png"
+  },
+  "zyw2": {
+    "name": "Огонек",
+    "name_en": "Candlelight",
+    "icon": "icons/zyw2.png"
+  },
+  "5rog": {
+    "name": "Пиявка",
+    "name_en": "Leech",
+    "icon": "icons/5rog.png"
+  },
+  "y5nz": {
+    "name": "Волчьи слезы",
+    "name_en": "Wolf Tears",
+    "icon": "icons/y5nz.png"
+  },
+  "wglp": {
+    "name": "Ветка Калины",
+    "name_en": "Viburnum Branch",
+    "icon": "icons/wglp.png"
+  },
+  "4l7p": {
+    "name": "Гребешок",
+    "name_en": "Scallop",
+    "icon": "icons/4l7p.png"
+  },
+  "kqp0": {
+    "name": "Жар-птица",
+    "name_en": "Firebird",
+    "icon": "icons/kqp0.png"
+  },
+  "qoq6": {
+    "name": "Солнце",
+    "name_en": "Sun",
+    "icon": "icons/qoq6.png"
+  },
+  "jkq7": {
+    "name": "Магма",
+    "name_en": "Magma",
+    "icon": "icons/jkq7.png"
+  },
+  "ljrj": {
+    "name": "Радиатор",
+    "name_en": "Radiator",
+    "icon": "icons/ljrj.png"
+  },
+  "rnvg": {
+    "name": "Шишка",
+    "name_en": "Cone",
+    "icon": "icons/rnvg.png"
+  },
+  "9n1w": {
+    "name": "Ягодка",
+    "name_en": "Berry",
+    "icon": "icons/9n1w.png"
+  },
+  "1k4q": {
+    "name": "Сало",
+    "name_en": "Lard",
+    "icon": "icons/1k4q.png"
+  },
+  "gypg": {
+    "name": "Плод",
+    "name_en": "Embryo",
+    "icon": "icons/gypg.png"
+  },
+  "zyo9": {
+    "name": "Болотный гнилец",
+    "name_en": "Swamp Rot",
+    "icon": "icons/zyo9.png"
+  },
+  "5r34": {
+    "name": "Сердце",
+    "name_en": "Heart",
+    "icon": "icons/5r34.png"
+  },
+  "y5yw": {
+    "name": "Гантель",
+    "name_en": "Dumbbell",
+    "icon": "icons/y5yw.png"
+  },
+  "wgzd": {
+    "name": "Остов",
+    "name_en": "Frame",
+    "icon": "icons/wgzd.png"
+  },
+  "gyjg": {
+    "name": "Кислотный кристалл",
+    "name_en": "Acid Crystal",
+    "icon": "icons/gyjg.png"
+  },
+  "zyv9": {
+    "name": "Кисель",
+    "name_en": "Lollipop",
+    "icon": "icons/zyv9.png"
+  },
+  "5r04": {
+    "name": "Флегма",
+    "name_en": "Phlegm",
+    "icon": "icons/5r04.png"
+  },
+  "y5vw": {
+    "name": "Скорлупа",
+    "name_en": "Crust",
+    "icon": "icons/y5vw.png"
+  },
+  "wgvd": {
+    "name": "Чернильница",
+    "name_en": "Inkwell",
+    "icon": "icons/wgvd.png"
+  },
+  "4lml": {
+    "name": "Змеиный глаз",
+    "name_en": "Snake Eye",
+    "icon": "icons/4lml.png"
+  },
+  "kqj3": {
+    "name": "Улитка",
+    "name_en": "Snail",
+    "icon": "icons/kqj3.png"
+  },
+  "qo59": {
+    "name": "Жвачка",
+    "name_en": "Gum",
+    "icon": "icons/qo59.png"
+  },
+  "jkj4": {
+    "name": "Ряска",
+    "name_en": "Lemna",
+    "icon": "icons/jkj4.png"
+  },
+  "ljpq": {
+    "name": "Многогранник",
+    "name_en": "Polyhedron",
+    "icon": "icons/ljpq.png"
+  },
+  "rnkl": {
+    "name": "Силки",
+    "name_en": "Snares",
+    "icon": "icons/rnkl.png"
+  },
+  "04yr": {
+    "name": "Виток",
+    "name_en": "Cycle",
+    "icon": "icons/04yr.png"
+  },
+  "9nml": {
+    "name": "Репях",
+    "name_en": "Burr",
+    "icon": "icons/9nml.png"
+  },
+  "1kdg": {
+    "name": "Липкий репях",
+    "name_en": "Sticky Burr",
+    "icon": "icons/1kdg.png"
+  },
+  "gy06": {
+    "name": "Ершик",
+    "name_en": "Scrubber",
+    "icon": "icons/gy06.png"
+  },
+  "zy7y": {
+    "name": "Ежик",
+    "name_en": "Hedgehog",
+    "icon": "icons/zy7y.png"
+  },
+  "5rd1": {
+    "name": "Стальной Ежик",
+    "name_en": "Steel Hedgehog",
+    "icon": "icons/5rd1.png"
+  },
+  "gyv6": {
+    "name": "Роза",
+    "name_en": "Rose",
+    "icon": "icons/gyv6.png"
+  },
+  "zyly": {
+    "name": "Цибуля",
+    "name_en": "Onion",
+    "icon": "icons/zyly.png"
+  },
+  "5rg1": {
+    "name": "Проклятая роза",
+    "name_en": "Cursed Rose",
+    "icon": "icons/5rg1.png"
+  },
+  "y5jk": {
+    "name": "Жильник",
+    "name_en": "Veiner",
+    "icon": "icons/y5jk.png"
+  },
+  "wg62": {
+    "name": "Белая роза",
+    "name_en": "White Rose",
+    "icon": "icons/wg62.png"
+  },
+  "4l1r": {
+    "name": "Протоцибуля",
+    "name_en": "Proto-Onion",
+    "icon": "icons/4l1r.png"
+  },
+  "kqgy": {
+    "name": "Браслет",
+    "name_en": "Bracelet",
+    "icon": "icons/kqgy.png"
+  },
+  "qokj": {
+    "name": "Тыква",
+    "name_en": "Pumpkin",
+    "icon": "icons/qokj.png"
+  },
+  "9nvy": {
+    "name": "Вехотка",
+    "name_en": "Sponge",
+    "icon": "icons/9nvy.png"
+  },
+  "1kv2": {
+    "name": "Прима",
+    "name_en": "Prima",
+    "icon": "icons/1kv2.png"
+  },
+  "gyg5": {
+    "name": "Креветка",
+    "name_en": "Shrimp",
+    "icon": "icons/gyg5.png"
+  },
+  "zypm": {
+    "name": "Золотистая Прима",
+    "name_en": "Golden Prima",
+    "icon": "icons/zypm.png"
+  },
+  "5rpq": {
+    "name": "Янтарник",
+    "name_en": "Amberite",
+    "icon": "icons/5rpq.png"
+  },
+  "y5m3": {
+    "name": "Криоген",
+    "name_en": "Cryogen",
+    "icon": "icons/y5m3.png"
+  },
+  "wgr3": {
+    "name": "Темный кристалл",
+    "name_en": "Dark Crystal",
+    "icon": "icons/wgr3.png"
+  },
+  "4lpo": {
+    "name": "Статик",
+    "name_en": "Static",
+    "icon": "icons/4lpo.png"
+  },
+  "gyq5": {
+    "name": "Спираль",
+    "name_en": "Spiral",
+    "icon": "icons/gyq5.png"
+  },
+  "zyrm": {
+    "name": "Зеркало",
+    "name_en": "Mirror",
+    "icon": "icons/zyrm.png"
+  },
+  "5rwq": {
+    "name": "Осколок",
+    "name_en": "Shard",
+    "icon": "icons/5rwq.png"
+  },
+  "y5w3": {
+    "name": "Призма",
+    "name_en": "Prism",
+    "icon": "icons/y5w3.png"
+  },
+  "wg53": {
+    "name": "Атом",
+    "name_en": "Atom",
+    "icon": "icons/wg53.png"
+  },
+  "gyln": {
+    "name": "Иней",
+    "name_en": "Frost",
+    "icon": "icons/gyln.png"
+  },
+  "zyqk": {
+    "name": "Хрусталь",
+    "name_en": "Leaded Glass",
+    "icon": "icons/zyqk.png"
+  },
+  "5rzo": {
+    "name": "Корка",
+    "name_en": "Rime",
+    "icon": "icons/5rzo.png"
+  },
+  "y5k0": {
+    "name": "Вихрь",
+    "name_en": "Whirlwind",
+    "icon": "icons/y5k0.png"
+  },
+  "wgwz": {
+    "name": "Фаренгейт",
+    "name_en": "Fahrenheit",
+    "icon": "icons/wgwz.png"
+  },
+  "kqoj": {
+    "name": "Каблук",
+    "name_en": "Heel",
+    "icon": "icons/kqoj.png"
+  },
+  "qo94": {
+    "name": "Куриный бог",
+    "name_en": "Chicken God",
+    "icon": "icons/qo94.png"
+  },
+  "jkml": {
+    "name": "Глаз бури",
+    "name_en": "Eye of the Storm",
+    "icon": "icons/jkml.png"
+  },
+  "ljn2": {
+    "name": "Морозец",
+    "name_en": "Chilly",
+    "icon": "icons/ljn2.png"
+  },
+  "rn1z": {
+    "name": "Опал",
+    "name_en": "Opal",
+    "icon": "icons/rn1z.png"
+  },
+  "9n7z": {
+    "name": "Рубик",
+    "name_en": "Rubik",
+    "icon": "icons/9n7z.png"
+  },
+  "1kw1": {
+    "name": "Кристалл Изнанки",
+    "name_en": "Crystal of Inside Out",
+    "icon": "icons/1kw1.png"
+  },
+  "gy7p": {
+    "name": "Сетчатка",
+    "name_en": "Retina",
+    "icon": "icons/gy7p.png"
+  },
+  "zymn": {
+    "name": "Смалец",
+    "name_en": "Tallow",
+    "icon": "icons/zymn.png"
+  },
+  "5rm0": {
+    "name": "Ключик",
+    "name_en": "Tiny Key",
+    "icon": "icons/5rm0.png"
+  },
+  "y5ro": {
+    "name": "Яйцо",
+    "name_en": "Egg",
+    "icon": "icons/y5ro.png"
+  },
+  "wgko": {
+    "name": "Роза Изнанки",
+    "name_en": "Inside Out Rose",
+    "icon": "icons/wgko.png"
+  },
+  "4lrn": {
+    "name": "Висмут",
+    "name_en": "Bismuth",
+    "icon": "icons/4lrn.png"
+  },
+  "kq4v": {
+    "name": "Темная калина",
+    "name_en": "Dark Viburnum",
+    "icon": "icons/kq4v.png"
+  },
+  "qodk": {
+    "name": "Бубльгум",
+    "name_en": "Bubblegum",
+    "icon": "icons/qodk.png"
+  },
+  "jky6": {
+    "name": "Изюм",
+    "name_en": "Raisin",
+    "icon": "icons/jky6.png"
+  },
+  "w4no": {
+    "name": "Канифоль",
+    "name_en": "Colophony",
+    "icon": "icons/w4no.png"
+  },
+  "49zn": {
+    "name": "Нервяк",
+    "name_en": "Stress Fest",
+    "icon": "icons/49zn.png"
+  },
+  "k3yv": {
+    "name": "Обруч",
+    "name_en": "Hoop",
+    "icon": "icons/k3yv.png"
+  },
+  "q1lk": {
+    "name": "Жабры",
+    "name_en": "Gills",
+    "icon": "icons/q1lk.png"
+  },
+  "j3p6": {
+    "name": "Смольник",
+    "name_en": "Fossil",
+    "icon": "icons/j3p6.png"
+  },
+  "g34p": {
+    "name": "Юла",
+    "name_en": "Peg-Top",
+    "icon": "icons/g34p.png"
+  },
+  "zjzn": {
+    "name": "Полено",
+    "name_en": "Timber",
+    "icon": "icons/zjzn.png"
+  },
+  "51l0": {
+    "name": "Харя",
+    "name_en": "Mug",
+    "icon": "icons/51l0.png"
+  },
+  "yq3o": {
+    "name": "Личинка",
+    "name_en": "Larva",
+    "icon": "icons/yq3o.png"
+  },
+  "w4jo": {
+    "name": "Черная дыра",
+    "name_en": "Black Hole",
+    "icon": "icons/w4jo.png"
+  },
+  "7z77": {
+    "name": "Желе",
+    "name_en": "Jelly",
+    "icon": "icons/7z77.png"
+  },
+  "6goy": {
+    "name": "Петля",
+    "name_en": "Loop",
+    "icon": "icons/6goy.png"
+  },
+  "k3rv": {
+    "name": "Чертов еж",
+    "name_en": "Wicked Hedgehog",
+    "icon": "icons/k3rv.png"
+  },
+  "q10k": {
+    "name": "Звено",
+    "name_en": "Link",
+    "icon": "icons/q10k.png"
+  },
+  "j306": {
+    "name": "Всполох",
+    "name_en": "Flicker",
+    "icon": "icons/j306.png"
+  }
+}

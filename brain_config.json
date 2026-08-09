@@ -1,0 +1,56 @@
+{
+  "fair_value": {
+    "window_sales": 50,
+    "window_days": 14,
+    "decay_lambda": 0.15,
+    "min_sales_required": 10,
+    "use_ptn_segmentation": true,
+    "cold_start_mode": "mark",
+    "fair_value_percentile": 35,
+    "outlier_trim_pct": 8,
+    "ptn_brackets": [[0, 4], [5, 9], [10, 14], [15, 15]],
+    "extended_window_days": 90,
+    "near_threshold_hint": {
+      "enabled": true,
+      "max_distance": 1
+    },
+    "market_cooling": {
+      "enabled": false,
+      "short_window_days": 3,
+      "short_window_sales": 15,
+      "cooling_threshold_pct": 15
+    },
+    "blend_segments": {
+      "enabled": false,
+      "min_weight": 0.3
+    }
+  },
+  "liquidity": {
+    "window_days": 7,
+    "target_hours": 12,
+    "confidence_level": 0.9
+  },
+  "time_to_sell": {
+    "use_price_dependent_lambda": true,
+    "competitor_penalty": true,
+    "target_price_mode": "fair_value"
+  },
+  "entry_filter": {
+    "min_absolute_profit": 1,
+    "min_absolute_profit_mode": "static",
+    "min_percent_profit": 0,
+    "max_price_lot": null,
+    "min_price_lot": null
+  },
+  "scoring": {
+    "formula": "profit_per_hour",
+    "confidence_penalty": true
+  },
+  "orderbook": {
+    "use_current_listings": false,
+    "ignore_if_competitors_below": 3
+  },
+  "fees": {
+    "auction_tax_percent": 5
+  }
+}
