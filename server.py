@@ -32,6 +32,12 @@ def sanitize_table_name(item_id: str) -> str:
 _sse_clients: deque = deque()
 _sse_lock = threading.Lock()
 
+# Текущий прогресс скана/расчёта — держим последнее известное состояние в
+# памяти, чтобы вкладка, открытая посреди цикла, сразу увидела актуальную
+# картину (не только новые тики через SSE).
+_scan_progress: dict = {"total": 0, "fetched": 0, "computed": 0, "active": False}
+_scan_progress_lock = threading.Lock()
+
 
 def get_last_active_run() -> str | None:
     """Время последнего успешного снимка активных лотов (коллектор)."""
@@ -53,6 +59,24 @@ def broadcast_update() -> None:
         for wfile in _sse_clients:
             try:
                 wfile.write(b"event: data-updated\ndata: {}\n\n")
+                wfile.flush()
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                stale.append(wfile)
+        for wfile in stale:
+            _sse_clients.remove(wfile)
+
+
+def broadcast_progress(payload: dict) -> None:
+    """Рассылает SSE-событие 'scan-progress' — лёгкий тик прогресса скана/
+    расчёта (total/fetched/computed), НЕ вызывает полную перезагрузку
+    данных на фронте (в отличие от 'data-updated')."""
+    data = json.dumps(payload, ensure_ascii=False)
+    message = f"event: scan-progress\ndata: {data}\n\n".encode("utf-8")
+    with _sse_lock:
+        stale = []
+        for wfile in _sse_clients:
+            try:
+                wfile.write(message)
                 wfile.flush()
             except (BrokenPipeError, ConnectionResetError, OSError):
                 stale.append(wfile)
@@ -395,6 +419,11 @@ class AuctionHandler(SimpleHTTPRequestHandler):
             self._send_json(load_brain_config())
             return
 
+        if parsed.path == "/api/scan-progress":
+            with _scan_progress_lock:
+                self._send_json(dict(_scan_progress))
+            return
+
         return super().do_GET()
 
     def do_POST(self) -> None:
@@ -403,6 +432,27 @@ class AuctionHandler(SimpleHTTPRequestHandler):
         if parsed.path == "/api/notify":
             # Коллектор уведомил: активные лоты обновлены — рассылаем SSE
             broadcast_update()
+            self._send_json({"ok": True})
+            return
+
+        if parsed.path == "/api/scan-progress":
+            # Коллектор шлёт лёгкий тик прогресса (total/fetched/computed) —
+            # обновляем состояние в памяти и рассылаем НЕ 'data-updated'
+            # (тот дёргает полную перезагрузку лотов), а отдельное лёгкое
+            # событие 'scan-progress', чтобы полоска обновлялась плавно и
+            # часто, без лишней нагрузки на фронт.
+            length = int(self.headers.get("Content-Length", 0) or 0)
+            body = self.rfile.read(length) if length else b"{}"
+            try:
+                incoming = json.loads(body or b"{}")
+            except json.JSONDecodeError:
+                incoming = {}
+            with _scan_progress_lock:
+                for key in ("total", "fetched", "computed", "active"):
+                    if key in incoming:
+                        _scan_progress[key] = incoming[key]
+                snapshot = dict(_scan_progress)
+            broadcast_progress(snapshot)
             self._send_json({"ok": True})
             return
 

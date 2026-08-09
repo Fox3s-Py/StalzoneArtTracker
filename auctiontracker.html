@@ -103,6 +103,42 @@
     box-shadow: 0 1px 0 rgba(157,255,92,0.04), 0 4px 24px rgba(0,0,0,0.5);
   }
 
+  /* ====== ПОЛОСКА ПРОГРЕССА СКАНА/РАСЧЁТА ====== */
+  /* Тонкая полоска сразу под шапкой (тоже sticky, чтобы держалась под ней
+     при скролле). Два слоя: тусклый "опрошено" снизу, яркий "посчитано"
+     сверху с размытым светящимся краем — растёт по мере того, как мозг
+     досчитывает пачки айтемов. */
+  .scan-progress-bar {
+    position: sticky;
+    top: 58px; /* высота .app-header */
+    z-index: 19;
+    height: 3px;
+    background: rgba(255,255,255,0.03);
+    overflow: visible;
+    opacity: 0;
+    transition: opacity 0.5s ease;
+    pointer-events: none;
+  }
+  .scan-progress-bar.active { opacity: 1; }
+  .scan-progress-fetched {
+    position: absolute; left: 0; top: 0; bottom: 0;
+    width: 0%;
+    background: rgba(157,255,92,0.16);
+    transition: width 0.5s ease;
+  }
+  .scan-progress-computed {
+    position: absolute; left: 0; top: 0; bottom: 0;
+    width: 0%;
+    background: linear-gradient(90deg, #b6ff85 0%, #7ede4c 88%, rgba(157,255,92,0) 100%);
+    transition: width 0.6s cubic-bezier(.22,.8,.32,1);
+  }
+  .scan-progress-computed::after {
+    content: "";
+    position: absolute; right: -10px; top: -5px; bottom: -5px; width: 22px;
+    background: radial-gradient(circle, rgba(182,255,133,0.85) 0%, rgba(182,255,133,0) 72%);
+    filter: blur(5px);
+  }
+
   .brand { display: flex; align-items: center; gap: 12px; }
 
   .brand-mark {
@@ -949,6 +985,12 @@
   </div>
 </header>
 
+<div class="scan-progress-bar" id="scan-progress-bar">
+  <div class="scan-progress-fetched" id="scan-progress-fetched"></div>
+  <div class="scan-progress-computed" id="scan-progress-computed"></div>
+</div>
+
+
 <div class="demo-banner" id="fallback-banner">
   <span class="icon" style="margin-top:2px;color:var(--amber);"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/><path d="M12 9v4"/><path d="M12 17h.01"/></svg></span>
   <span>
@@ -1654,6 +1696,30 @@ function updateFetchedStatus() {
   }
 }
 
+function updateScanProgress(data) {
+  const bar = document.getElementById("scan-progress-bar");
+  const fetchedEl = document.getElementById("scan-progress-fetched");
+  const computedEl = document.getElementById("scan-progress-computed");
+  if (!bar || !fetchedEl || !computedEl || !data) return;
+
+  const total = data.total || 0;
+  const fetchedPct = total ? Math.min(100, (data.fetched / total) * 100) : 0;
+  const computedPct = total ? Math.min(100, (data.computed / total) * 100) : 0;
+  fetchedEl.style.width = fetchedPct + "%";
+  computedEl.style.width = computedPct + "%";
+
+  if (data.active) {
+    bar.classList.add("active");
+  } else {
+    // недолгая пауза, чтобы глаз успел увидеть 100%, потом гасим и сбрасываем
+    setTimeout(() => {
+      bar.classList.remove("active");
+      fetchedEl.style.width = "0%";
+      computedEl.style.width = "0%";
+    }, 900);
+  }
+}
+
 function startLiveUpdates() {
   if (COUNTDOWN_INTERVAL_ID) clearInterval(COUNTDOWN_INTERVAL_ID);
   COUNTDOWN_INTERVAL_ID = setInterval(() => {
@@ -1664,8 +1730,14 @@ function startLiveUpdates() {
   if (typeof EventSource !== "undefined") {
     const es = new EventSource("/api/events");
     es.addEventListener("data-updated", () => { void refreshLiveData(); });
+    es.addEventListener("scan-progress", (e) => {
+      try { updateScanProgress(JSON.parse(e.data)); } catch (err) { /* ignore */ }
+    });
     es.onerror = () => {};
   }
+
+  // Подхватить текущий прогресс, если вкладку открыли посреди уже идущего скана
+  fetchJson("/api/scan-progress").then(updateScanProgress).catch(() => {});
 }
 
 async function init() {

@@ -57,9 +57,9 @@ LIMIT = 200
 CUTOFF_DATE = datetime(2024, 1, 1, tzinfo=timezone.utc)
 MAX_WORKERS = 8           # Для Истории
 ACTIVE_MAX_WORKERS = 6    # Оптимально для 1-минутного опроса Активных лотов
-MIN_REQUEST_INTERVAL = 0.3
-MAX_RETRIES = 5
-MAX_RETRIES_429 = 8
+MIN_REQUEST_INTERVAL = 0.5
+MAX_RETRIES = 3
+MAX_RETRIES_429 = 4
 
 SORT = "buyout_price"
 ORDER = "asc"
@@ -186,6 +186,27 @@ def notify_server() -> None:
         pass  # сервер может быть не запущен — это не критично
 
 
+# ---- Прогресс скана/расчёта для полоски на сайте ----
+# total/fetched считает job_active_lots (главный поток), computed — прибавляет
+# brain_worker_loop (отдельный поток) по мере готовности пачек. Общий словарь
+# под одним локом, т.к. пишут из двух потоков.
+_progress_lock = threading.Lock()
+_progress_state = {"total": 0, "fetched": 0, "computed": 0}
+
+
+def notify_progress(active: bool) -> None:
+    """Шлёт лёгкий тик прогресса на сервер — НЕ вызывает полную перезагрузку
+    данных на фронте (в отличие от notify_server/broadcast_update), только
+    обновляет полоску прогресса. Не критично, если сервер не запущен."""
+    with _progress_lock:
+        payload = dict(_progress_state)
+    payload["active"] = active
+    try:
+        requests.post("http://127.0.0.1:8000/api/scan-progress", json=payload, timeout=2)
+    except Exception:
+        pass
+
+
 def trigger_brain_recompute() -> None:
     """Запускает brain.recompute_all() в фоновом потоке — полный пересчёт,
     используется как страховка (например после --once) или вручную.
@@ -268,6 +289,10 @@ def brain_worker_loop() -> None:
 
         if ok:
             log.info("brain: частичный пересчёт готов (%d айтемов)", len(batch))
+            with _progress_lock:
+                _progress_state["computed"] += len(batch)
+                still_active = _progress_state["computed"] < _progress_state["total"]
+            notify_progress(active=still_active)
             notify_server()
         else:
             # лок был занят — не потеряли айтемы, вернули в очередь на следующий раунд
@@ -721,6 +746,12 @@ def job_active_lots() -> None:
         item_ids = load_item_ids()
         log.info("Артефактов для опроса: %d", len(item_ids))
 
+        with _progress_lock:
+            _progress_state["total"] = len(item_ids)
+            _progress_state["fetched"] = 0
+            _progress_state["computed"] = 0
+        notify_progress(active=True)
+
         cur = conn.execute(
             "INSERT INTO fetch_runs (started_at, status) VALUES (?, 'running')",
             (started_at,),
@@ -777,6 +808,10 @@ def job_active_lots() -> None:
                 log.info("[%s] %d лотов записаны", iid, len(rows))
                 mark_dirty(iid)
 
+                with _progress_lock:
+                    _progress_state["fetched"] += 1
+                notify_progress(active=True)
+
         finished_at = utc_now_iso()
         if failed_items:
             status = "partial"
@@ -811,9 +846,9 @@ def job_active_lots() -> None:
             elapsed, total_lots, skipped_no_buyout, len(failed_items),
         )
 
-        # Каждый айтем уже пересчитан по мере готовности через mark_dirty()
-        # выше — здесь просто финальный SSE-пинг на случай, если что-то из
-        # частичных пересчётов ещё не долетело до фронта.
+        # Полоску прогресса НЕ гасим здесь: последние пачки могут ещё
+        # досчитываться в brain_worker_loop (дебаунс + сам пересчёт). Она
+        # гаснет там, когда computed реально догонит total — см. ниже.
         notify_server()
 
     except Exception:
