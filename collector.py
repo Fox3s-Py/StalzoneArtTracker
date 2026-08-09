@@ -751,7 +751,7 @@ def job_active_lots() -> None:
 
                 rows = []
                 for lot in lots:
-                    row = lot_to_row(lot, iid, run_id, now)
+                    row = lot_to_row(lot, iid, run_id, now) # type: ignore
                     if row:
                         rows.append(row)
                     else:
@@ -784,20 +784,26 @@ def job_active_lots() -> None:
                 "INSERT OR REPLACE INTO collector_state (key, value) VALUES ('last_active_run_error', ?)",
                 (f"ошибки по {len(failed_items)} артефактам: {failed_items[:5]}",),
             )
-            set_collector_status(f"Частично: {len(failed_items)} артефактов не обновлены")
         else:
             status = "ok"
             conn.execute(
                 "INSERT OR REPLACE INTO collector_state (key, value) VALUES ('last_active_run', ?)",
                 (finished_at,),
             )
-            set_collector_status("Ожидание (спим до следующей минуты)...")
 
         conn.execute(
             "UPDATE fetch_runs SET status=?, finished_at=?, lots_count=? WHERE id=?",
             (status, finished_at, total_lots, run_id),
         )
-        conn.commit()
+        conn.commit()  # ВАЖНО: коммитим ДО set_collector_status — та функция открывает
+        # своё отдельное соединение и пишет в ту же collector_state; если наша
+        # транзакция ещё не закоммичена, второе соединение упрётся в лок и через
+        # 10с (её timeout) сдастся с "database is locked" — это и было в логах.
+
+        if failed_items:
+            set_collector_status(f"Частично: {len(failed_items)} артефактов не обновлены")
+        else:
+            set_collector_status("Ожидание (спим до следующей минуты)...")
 
         elapsed = time.monotonic() - started
         log.info(
