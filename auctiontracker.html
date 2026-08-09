@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Auction Tracker — личный трекер аукциона</title>
+<title>Art Tracker — личный трекер аукциона</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@500;600;700&family=Inter:wght@400;500;600&family=Geist+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
@@ -921,6 +921,23 @@
   .sale-time { font-family: var(--font-mono); font-size: 11px; color: var(--muted-fg); }
   .sale-price { font-family: var(--font-mono); font-weight: 600; font-size: 12px; color: var(--destructive); white-space: nowrap; }
   .sales-empty { padding: 22px; text-align: center; color: var(--muted-fg); font-family: var(--font-mono); font-size: 12px; }
+  .sales-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 6px;
+    font-size: 11px;
+    font-family: var(--font-mono);
+    color: var(--muted-fg);
+  }
+  .ptn-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+  .ptn-row input[type="range"] { flex: 1; min-width: 160px; }
+  .ptn-exact-wrap { white-space: nowrap; }
 
   /* ====== BRAIN MODAL ====== */
   .brain-status {
@@ -970,7 +987,7 @@
     <div class="brand-mark">SZ</div>
     <div>
       <div class="brand-eyebrow">личный трекер</div>
-      <div class="brand-title">Auction <span>Tracker</span></div>
+      <div class="brand-title">Art <span>Tracker</span></div>
     </div>
   </div>
 
@@ -1150,7 +1167,13 @@
         </div>
         <div class="field m-item-col">
           <label class="range-label">Заточка: <b id="m-ptn-val">Все</b></label>
-          <input type="range" id="m-ptn" min="0" max="16" value="0">
+          <div class="ptn-row">
+            <input type="range" id="m-ptn" min="0" max="16" value="0">
+            <label class="checkbox-wrap ptn-exact-wrap" id="m-ptn-exact-wrap">
+              <input type="checkbox" id="m-ptn-exact" checked>
+              <span>Только этот уровень</span>
+            </label>
+          </div>
         </div>
       </div>
 
@@ -1181,8 +1204,14 @@
         </div>
       </div>
 
+      <div class="sales-head" id="m-sales-head" style="display:none;">
+        <span id="m-sales-shown">Показано 0 из 0</span>
+      </div>
       <div class="sales-list" id="m-sales-list">
         <div class="sales-empty">Нет данных для отображения</div>
+      </div>
+      <div class="load-more-wrap" id="m-sales-more-wrap" style="display:none;text-align:center;margin-top:12px;">
+        <button class="btn" id="m-sales-more">Показать ещё 500</button>
       </div>
     </div>
   </div>
@@ -1260,6 +1289,8 @@ let LAST_ACTIVE_RUN = null;
 let BRAIN_READY = false;
 let HISTORY_LOADING = false;
 let COUNTDOWN_INTERVAL_ID = null;
+let historyRequestSeq = 0;
+const HISTORY_MAX_HOURS = 2160; // 90 дней — максимальный период, кэшируем всё сразу
 
 async function fetchJson(url) {
   const resp = await fetch(url);
@@ -1279,18 +1310,47 @@ async function loadRealData() {
   return flat;
 }
 
+function autoSelectRange() {
+  // Выбираем наименьший период, в котором есть хотя бы одна продажа
+  // с учётом текущих фильтров (качество + заточка).
+  const records = HISTORY[modalState.itemId] || [];
+  for (const hours of RANGE_OPTIONS) {
+    if (filterHistoryRecords(records, hours).length > 0) {
+      modalState.rangeHours = hours;
+      updateRangeButtons();
+      return;
+    }
+  }
+  // Если продаж нет ни за один период — оставляем 90д, чтобы показать пустоту
+  modalState.rangeHours = RANGE_OPTIONS[RANGE_OPTIONS.length - 1];
+  updateRangeButtons();
+}
+
 async function loadHistoryForItem(itemId) {
   if (!itemId) return;
+  // Если данные за 90д уже загружены — не перезагружаем, просто рендерим
+  if (HISTORY[itemId] && HISTORY[itemId].length > 0) {
+    if (modalState.exactMatch) autoSelectRange();
+    renderHistoryModal();
+    return;
+  }
+  const seq = ++historyRequestSeq;
   HISTORY_LOADING = true;
   try {
-    const payload = await fetchJson(`/api/history/${encodeURIComponent(itemId)}?hours=${modalState.rangeHours}`);
+    const payload = await fetchJson(`/api/history/${encodeURIComponent(itemId)}?hours=${HISTORY_MAX_HOURS}`);
     const records = Array.isArray(payload) ? payload : (payload.history || []);
+    // Игнорируем устаревший ответ, если пользователь уже выбрал другой айтем
+    if (seq !== historyRequestSeq) return;
     HISTORY[itemId] = Array.isArray(records) ? records : [];
   } catch (e) {
+    if (seq !== historyRequestSeq) return;
     HISTORY[itemId] = [];
   } finally {
-    HISTORY_LOADING = false;
-    renderHistoryModal();
+    if (seq === historyRequestSeq) {
+      HISTORY_LOADING = false;
+      if (modalState.exactMatch) autoSelectRange();
+      renderHistoryModal();
+    }
   }
 }
 
@@ -1666,6 +1726,10 @@ async function refreshLiveData() {
     updateFetchedStatus();
     populateHistoryItemSelect();
     applyFilters();
+    // Если модалка истории открыта — перерисовать, чтобы название артефакта не пропадало
+    if (document.getElementById("modal-overlay").classList.contains("show") && modalState.itemId) {
+      renderHistoryModal();
+    }
   } catch (e) {
     console.warn("Live refresh failed:", e);
   }
@@ -1768,20 +1832,47 @@ async function init() {
 const modalState = {
   itemId: "", rarity: "all", ptn: 0, rangeHours: 24,
   exactMatch: false, exactQlt: null, exactPtn: null,
+  ptnExact: true,
 };
 let chartInstance = null;
+const SALES_PAGE_SIZE = 500;
+let salesVisibleCount = SALES_PAGE_SIZE;
+const RANGE_OPTIONS = [24, 72, 168, 720, 2160];
 
 function populateHistoryItemSelect() {
   const select = document.getElementById("m-item");
+  if (!select) return;
   const entries = Object.entries(ITEMS).sort((a, b) => a[1].name.localeCompare(b[1].name, "ru"));
   select.innerHTML = '<option value="">— Выберите артефакт —</option>' +
     entries.map(([id, meta]) => `<option value="${id}">${meta.name}</option>`).join("");
+  // Восстанавливаем выбранный артефакт, чтобы название не пропадало при live-обновлении
+  if (modalState.itemId && ITEMS[modalState.itemId]) {
+    select.value = modalState.itemId;
+  }
+}
+
+function syncPtnExactCheckbox() {
+  const cb = document.getElementById("m-ptn-exact");
+  if (cb) cb.checked = modalState.ptnExact;
+}
+
+function updatePtnExactVisibility() {
+  const wrap = document.getElementById("m-ptn-exact-wrap");
+  if (wrap) wrap.style.display = modalState.ptn === 0 ? "none" : "flex";
+}
+
+function updateRangeButtons() {
+  document.querySelectorAll("#m-range button").forEach(b => {
+    b.classList.toggle("active", Number(b.dataset.hours) === modalState.rangeHours);
+  });
 }
 
 function openHistoryModal() {
   modalState.exactMatch = false;
   modalState.exactQlt = null;
   modalState.exactPtn = null;
+  modalState.ptnExact = true;
+  syncPtnExactCheckbox();
   document.getElementById("modal-overlay").classList.add("show");
   renderHistoryModal();
 }
@@ -1795,6 +1886,7 @@ function openLotHistory(itemId, qlt, ptn) {
   modalState.exactMatch = true;
   modalState.exactQlt = Number(qlt);
   modalState.exactPtn = ptnValue;
+  modalState.ptnExact = true;
 
   const itemSelect = document.getElementById("m-item");
   if (itemSelect) itemSelect.value = itemId;
@@ -1807,6 +1899,7 @@ function openLotHistory(itemId, qlt, ptn) {
     ptnSliderEl.value = modalState.ptn;
     setupRangeBackground(ptnSliderEl, mPtnVal);
   }
+  syncPtnExactCheckbox();
 
   document.getElementById("modal-overlay").classList.add("show");
   if (itemId) void loadHistoryForItem(itemId);
@@ -1828,7 +1921,10 @@ document.getElementById("m-item").addEventListener("change", (e) => {
   modalState.exactMatch = false;
   modalState.exactQlt = null;
   modalState.exactPtn = null;
+  modalState.ptnExact = true;
+  syncPtnExactCheckbox();
   modalState.itemId = e.target.value;
+  resetSalesPagination();
   if (modalState.itemId) void loadHistoryForItem(modalState.itemId);
   else renderHistoryModal();
 });
@@ -1836,7 +1932,10 @@ document.getElementById("m-rarity").addEventListener("change", (e) => {
   modalState.exactMatch = false;
   modalState.exactQlt = null;
   modalState.exactPtn = null;
+  modalState.ptnExact = true;
+  syncPtnExactCheckbox();
   modalState.rarity = e.target.value;
+  resetSalesPagination();
   renderHistoryModal();
 });
 
@@ -1848,6 +1947,14 @@ mPtnSlider.addEventListener("input", (e) => {
   modalState.exactQlt = null;
   modalState.exactPtn = null;
   modalState.ptn = Number(e.target.value);
+  updatePtnExactVisibility();
+  resetSalesPagination();
+  renderHistoryModal();
+});
+
+document.getElementById("m-ptn-exact").addEventListener("change", (e) => {
+  modalState.ptnExact = e.target.checked;
+  resetSalesPagination();
   renderHistoryModal();
 });
 
@@ -1856,15 +1963,40 @@ document.querySelectorAll("#m-range button").forEach(btn => {
     document.querySelectorAll("#m-range button").forEach(b => b.classList.remove("active"));
     btn.classList.add("active");
     modalState.rangeHours = Number(btn.dataset.hours);
-    if (modalState.itemId) void loadHistoryForItem(modalState.itemId);
-    else renderHistoryModal();
+    // Данные за 90д уже в кэше — просто перерисовываем
+    resetSalesPagination();
+    renderHistoryModal();
   });
 });
 
-function getFilteredHistory() {
-  if (!modalState.itemId) return [];
-  const records = HISTORY[modalState.itemId] || [];
-  const cutoff = Date.now() - modalState.rangeHours * 3600 * 1000;
+function resetSalesPagination() {
+  salesVisibleCount = SALES_PAGE_SIZE;
+  const moreWrap = document.getElementById("m-sales-more-wrap");
+  if (moreWrap) moreWrap.style.display = "none";
+}
+
+function updateSalesMoreButton() {
+  const list = document.getElementById("m-sales-list");
+  const moreWrap = document.getElementById("m-sales-more-wrap");
+  if (!list || !moreWrap) return;
+  const records = getFilteredHistory();
+  const sorted = [...records].sort((a, b) => new Date(b.time) - new Date(a.time));
+  const atBottom = list.scrollTop + list.clientHeight >= list.scrollHeight - 10;
+  const hasMore = sorted.length > salesVisibleCount;
+  moreWrap.style.display = (atBottom && hasMore) ? "block" : "none";
+}
+
+document.getElementById("m-sales-list").addEventListener("scroll", updateSalesMoreButton);
+
+document.getElementById("m-sales-more").addEventListener("click", () => {
+  salesVisibleCount += SALES_PAGE_SIZE;
+  renderHistoryModal();
+  const list = document.getElementById("m-sales-list");
+  if (list) list.scrollTop = list.scrollHeight;
+});
+
+function filterHistoryRecords(records, rangeHours) {
+  const cutoff = Date.now() - rangeHours * 3600 * 1000;
   return records.filter(r => {
     const t = new Date(r.time).getTime();
     if (t < cutoff) return false;
@@ -1879,13 +2011,30 @@ function getFilteredHistory() {
     }
 
     if (modalState.rarity !== "all" && (r.qlt ?? 0) !== Number(modalState.rarity)) return false;
-    if (modalState.ptn === 1) {
-      if (r.ptn != null && r.ptn !== 0) return false;
-    } else if (modalState.ptn > 1) {
-      if (!r.ptn || r.ptn < modalState.ptn - 1) return false;
+
+    // Чекбокс «Только этот уровень» включён — показываем только ровно этот уровень.
+    // Выключен — показываем все начиная с указанного уровня.
+    if (modalState.ptnExact) {
+      if (modalState.ptn === 1) {
+        if ((r.ptn ?? 0) !== 0) return false;
+      } else if (modalState.ptn > 1) {
+        if ((r.ptn ?? 0) !== modalState.ptn - 1) return false;
+      }
+    } else {
+      if (modalState.ptn === 1) {
+        if (r.ptn != null && r.ptn !== 0) return false;
+      } else if (modalState.ptn > 1) {
+        if (!r.ptn || r.ptn < modalState.ptn - 1) return false;
+      }
     }
     return true;
   });
+}
+
+function getFilteredHistory() {
+  if (!modalState.itemId) return [];
+  const records = HISTORY[modalState.itemId] || [];
+  return filterHistoryRecords(records, modalState.rangeHours);
 }
 
 function bucketSizeMs(rangeHours) {
@@ -2056,12 +2205,27 @@ function renderStats(records) {
 
 function renderSalesList(records) {
   const list = document.getElementById("m-sales-list");
+  const head = document.getElementById("m-sales-head");
+  const shownEl = document.getElementById("m-sales-shown");
+  const moreWrap = document.getElementById("m-sales-more-wrap");
+
   if (records.length === 0) {
     list.innerHTML = '<div class="sales-empty">Нет продаж за выбранный период</div>';
+    if (head) head.style.display = "none";
+    if (moreWrap) moreWrap.style.display = "none";
     return;
   }
-  const sorted = [...records].sort((a, b) => new Date(b.time) - new Date(a.time)).slice(0, 100);
-  list.innerHTML = sorted.map(r => {
+
+  const sorted = [...records].sort((a, b) => new Date(b.time) - new Date(a.time));
+  const visible = sorted.slice(0, salesVisibleCount);
+  if (head) {
+    head.style.display = "flex";
+    if (shownEl) shownEl.textContent = `Показано ${visible.length} из ${sorted.length}`;
+  }
+  // Кнопка скрыта по умолчанию — появится только при долистывании списка до конца
+  if (moreWrap) moreWrap.style.display = "none";
+
+  list.innerHTML = visible.map(r => {
     const rarity = RARITY[r.qlt ?? 0] || RARITY[0];
     const ptnLabel = r.ptn ? ` +${r.ptn}` : "";
     const time = new Date(r.time).toLocaleString("ru-RU", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
@@ -2076,6 +2240,9 @@ function renderSalesList(records) {
       </div>
     `;
   }).join("");
+
+  // Проверяем, нужно ли показать кнопку «Показать ещё» после рендера
+  updateSalesMoreButton();
 }
 
 function renderHistoryModal() {
@@ -2086,11 +2253,14 @@ function renderHistoryModal() {
   const changeEl = document.getElementById("m-change");
   const countEl = document.getElementById("m-sales-count");
 
+  const moreWrap = document.getElementById("m-sales-more-wrap");
+
   if (!modalState.itemId) {
     chartEmpty.innerHTML = `<span class="chart-empty-icon">${ICONS.search}</span><span>Выберите артефакт</span>`;
     chartEmpty.style.display = "flex";
     chart.style.display = "none";
     salesList.innerHTML = '<div class="sales-empty">Выберите артефакт</div>';
+    if (moreWrap) moreWrap.style.display = "none";
     avgEl.innerHTML = '— <span class="unit">₽</span>';
     changeEl.textContent = "—";
     changeEl.style.color = "";
@@ -2103,9 +2273,11 @@ function renderHistoryModal() {
     chartEmpty.style.display = "flex";
     chart.style.display = "none";
     salesList.innerHTML = '<div class="sales-empty">Загрузка…</div>';
+    if (moreWrap) moreWrap.style.display = "none";
     return;
   }
 
+  updatePtnExactVisibility();
   const records = getFilteredHistory();
   renderChart(records);
   renderStats(records);
