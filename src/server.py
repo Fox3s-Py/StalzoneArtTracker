@@ -48,7 +48,7 @@ ACTIVE_DB = os.path.join(BASE_DIR, "data", "auction_active.sqlite3")
 HISTORY_DB = os.path.join(BASE_DIR, "data", "auction_history.sqlite3")
 SCORES_DB = os.path.join(BASE_DIR, "data", "auction_scores.sqlite3")
 ITEMS_PATH = os.path.join(BASE_DIR, "data", "items.json")
-BRAIN_CONFIG_PATH = os.path.join(BASE_DIR, "config", "brain_config.json")
+BRAIN_CONFIG_PATH = os.path.join(BASE_DIR, "app_config", "brain_config.json")
 
 
 def sanitize_table_name(item_id: str) -> str:
@@ -372,7 +372,7 @@ def build_payload(mode: str = "scored") -> dict:
 
 
 def load_brain_config() -> dict:
-    """Читает конфиг мозга config/brain_config.json (пороги, формулы, фильтры)."""
+    """Читает конфиг мозга app_config/brain_config.json (пороги, формулы, фильтры)."""
     if not os.path.exists(BRAIN_CONFIG_PATH):
         return {}
     with open(BRAIN_CONFIG_PATH, "r", encoding="utf-8") as fh:
@@ -380,7 +380,7 @@ def load_brain_config() -> dict:
 
 
 def save_brain_config(cfg: dict) -> None:
-    """Сохраняет новый конфиг мозга в config/brain_config.json."""
+    """Сохраняет новый конфиг мозга в app_config/brain_config.json."""
     with open(BRAIN_CONFIG_PATH, "w", encoding="utf-8") as fh:
         json.dump(cfg, fh, ensure_ascii=False, indent=2)
 

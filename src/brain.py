@@ -12,7 +12,7 @@
 3. Результат складывает в кэш auction_scores.sqlite3, который server.py
    джойнит к лотам при отдаче на сайт.
 
-Конфиг (пороги, формулы, фильтры) читается из config/brain_config.json на
+Конфиг (пороги, формулы, фильтры) читается из app_config/brain_config.json на
 каждый прогон заново — правки с сайта (/api/brain-config) применяются без
 перезапуска демона.
 
@@ -55,7 +55,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 HISTORY_DB = BASE_DIR / "data" / "auction_history.sqlite3"
 ACTIVE_DB = BASE_DIR / "data" / "auction_active.sqlite3"
 SCORES_DB = BASE_DIR / "data" / "auction_scores.sqlite3"
-CONFIG_PATH = BASE_DIR / "config" / "brain_config.json"
+CONFIG_PATH = BASE_DIR / "app_config" / "brain_config.json"
 LOG_FILE = BASE_DIR / "logs" / "brain.log"
 
 POLL_INTERVAL_SEC = 15  # частота поллинга «появились ли новые активные лоты»
@@ -240,7 +240,7 @@ def load_config() -> dict:
 
 
 def save_config(cfg: dict) -> None:
-    """Сохраняет конфиг в config/brain_config.json."""
+    """Сохраняет конфиг в app_config/brain_config.json."""
     CONFIG_PATH.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
@@ -832,8 +832,8 @@ def compute_fair_value(
 
 def recompute_fair_values(
     hconn: sqlite3.Connection, sconn: sqlite3.Connection, cfg: dict,
-    item_ids: list[str] | None = None,
-) -> dict:
+        item_ids: list[str] | None = None,
+) -> tuple[dict, dict]:
     """Считает fair value для сегментов, встречающихся в активных лотах, и пишет в кэш.
 
     Возвращает {(item_id, qlt, ptn): FairValueResult} и словарь hints
