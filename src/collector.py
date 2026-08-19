@@ -41,14 +41,14 @@ sys.stdout.reconfigure(encoding="utf-8", errors="replace", line_buffering=True) 
 
 # ---- Конфиг ----
 
-BASE_DIR = Path(__file__).resolve().parent
+BASE_DIR = Path(__file__).resolve().parent.parent
 
 HISTORY_INTERVAL_MIN = 10
 ACTIVE_INTERVAL_SEC = 60  # Изменено на 60 секунд (1 минута)
-HISTORY_DB = BASE_DIR / "auction_history.sqlite3"
-ACTIVE_DB = BASE_DIR / "auction_active.sqlite3"
-ITEMS_JSON = BASE_DIR / "items.json"
-LOG_FILE = BASE_DIR / "collector.log"
+HISTORY_DB = BASE_DIR / "data" / "auction_history.sqlite3"
+ACTIVE_DB = BASE_DIR / "data" / "auction_active.sqlite3"
+ITEMS_JSON = BASE_DIR / "data" / "items.json"
+LOG_FILE = BASE_DIR / "logs" / "collector.log"
 
 REGION = "RU"
 BASE_URL = "https://eapi.stalzone.com"

@@ -54,13 +54,13 @@ sys.stdout.reconfigure(encoding="utf-8", errors="replace", line_buffering=True) 
 
 # ---- Пути ----
 
-BASE_DIR = Path(__file__).resolve().parent
+BASE_DIR = Path(__file__).resolve().parent.parent
 
-HISTORY_DB = BASE_DIR / "auction_history.sqlite3"
-ACTIVE_DB = BASE_DIR / "auction_active.sqlite3"
-SCORES_DB = BASE_DIR / "auction_scores.sqlite3"
-CONFIG_PATH = BASE_DIR / "brain_config.json"
-LOG_FILE = BASE_DIR / "brain.log"
+HISTORY_DB = BASE_DIR / "data" / "auction_history.sqlite3"
+ACTIVE_DB = BASE_DIR / "data" / "auction_active.sqlite3"
+SCORES_DB = BASE_DIR / "data" / "auction_scores.sqlite3"
+CONFIG_PATH = BASE_DIR / "config" / "brain_config.json"
+LOG_FILE = BASE_DIR / "logs" / "brain.log"
 
 POLL_INTERVAL_SEC = 15  # как часто проверять, не обновился ли активный снимок
 
@@ -353,7 +353,7 @@ def get_active_last_run(conn: sqlite3.Connection) -> str | None:
 
 
 def load_item_ids() -> list[str]:
-    items_path = BASE_DIR / "items.json"
+    items_path = BASE_DIR / "data" / "items.json"
     if not items_path.exists():
         return []
     return list(json.loads(items_path.read_text(encoding="utf-8")).keys())

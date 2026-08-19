@@ -13,14 +13,15 @@ sys.stdout.reconfigure(encoding="utf-8", errors="replace", line_buffering=True) 
 sys.stderr.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)  # type: ignore[attr-defined]
 
 PORT = 8000
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-os.chdir(BASE_DIR)
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+WEB_DIR = os.path.join(BASE_DIR, "web")
+os.chdir(WEB_DIR)
 
-ACTIVE_DB = os.path.join(BASE_DIR, "auction_active.sqlite3")
-HISTORY_DB = os.path.join(BASE_DIR, "auction_history.sqlite3")
-SCORES_DB = os.path.join(BASE_DIR, "auction_scores.sqlite3")
-ITEMS_PATH = os.path.join(BASE_DIR, "items.json")
-BRAIN_CONFIG_PATH = os.path.join(BASE_DIR, "brain_config.json")
+ACTIVE_DB = os.path.join(BASE_DIR, "data", "auction_active.sqlite3")
+HISTORY_DB = os.path.join(BASE_DIR, "data", "auction_history.sqlite3")
+SCORES_DB = os.path.join(BASE_DIR, "data", "auction_scores.sqlite3")
+ITEMS_PATH = os.path.join(BASE_DIR, "data", "items.json")
+BRAIN_CONFIG_PATH = os.path.join(BASE_DIR, "config", "brain_config.json")
 
 
 def sanitize_table_name(item_id: str) -> str:
@@ -491,7 +492,7 @@ class AuctionHandler(SimpleHTTPRequestHandler):
 
 def open_chrome():
     time.sleep(1)
-    url = f"http://127.0.0.1:{PORT}/auctiontracker.html"
+    url = f"http://127.0.0.1:{PORT}/"
 
     try:
         subprocess.Popen([
