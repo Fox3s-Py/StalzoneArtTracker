@@ -1,19 +1,26 @@
-"""
-Фоновый сборщик данных аукциона STALZONE.
+"""Сборщик данных аукциона STALZONE — стягивает данные с API в SQLite.
 
-Два job'а:
-- job_history()   — дополнение auction_history.sqlite3 (режим topup)
-- job_active_lots() — атомарный снимок активных лотов в auction_active.sqlite3
+Работает с API eapi.stalzone.com и наполняет две БД:
 
-После каждого успешного снимка активных лотов collector запускает brain.py
-(через прямой импорт и фоновый поток) для немедленного пересчёта fair value
-и score — без ожидания таймера опроса.
+1. job_history()       — история продаж предметов (auction_history.sqlite3).
+   Каждый предмет живёт в своей таблице hist_<item_id>. Сбор идёт «topup»:
+   догружаются новые страницы, уже сохранённые записи не перезаписываются.
+   Запускается при старте и далее раз в HISTORY_INTERVAL_SEC.
+
+2. job_active_lots()   — снимок активных лотов (auction_active.sqlite3).
+   Опрашивает ВСЕ предметы параллельно, пишет лоты сразу по мере готовности
+   и помечает пропавшие лоты как status='gone'. Повторяется каждую минуту.
+
+Связь с мозгом: каждый записанный предмет помечается «грязным» (mark_dirty),
+и фоновый поток brain_worker_loop просит brain.py пересчитать только эти
+предметы (инкрементальный пересчёт вместо полного). По завершении цикла
+collector уведомляет server.py по HTTP, чтобы тот разослал SSE-события сайту.
 
 Запуск:
-    python collector.py              # daemon: оба job по расписанию
-    python collector.py --once       # один цикл обоих job и выход
-    python collector.py --once history
-    python collector.py --once active
+    python src/collector.py                # daemon: история + активные по расписанию
+    python src/collector.py --once         # один полный цикл и выход
+    python src/collector.py --once history
+    python src/collector.py --once active
 """
 
 from __future__ import annotations
@@ -37,9 +44,9 @@ from config import CLIENT_ID, CLIENT_SECRET
 
 import brain as brain_module
 
-sys.stdout.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)  # type: ignore[attr-defined][cite: 6]
+sys.stdout.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)  # type: ignore[attr-defined]
 
-# ---- Конфиг ----
+# ---- Параметры и пути ----
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -95,6 +102,11 @@ _shutdown = threading.Event()
 
 
 def rate_limited_wait() -> None:
+    """Выдерживает паузу MIN_REQUEST_INTERVAL между запросами к API.
+
+    Несколько потоков делят один «последний момент запроса» (глобальный),
+    поэтому тайминги соблюдаются глобально, а не в каждом потоке отдельно.
+    """
     global _last_request_time
     with _rate_lock:
         now = time.monotonic()
@@ -105,10 +117,12 @@ def rate_limited_wait() -> None:
 
 
 def headers() -> dict:
+    """Заголовки аутентификации для запросов к API STALZONE."""
     return {"Client-Id": CLIENT_ID, "Client-Secret": CLIENT_SECRET}
 
 
 def load_item_ids() -> list[str]:
+    """Список ID предметов из справочника data/items.json (по нему идёт сбор)."""
     if not ITEMS_JSON.exists():
         raise SystemExit(
             f"Не найден {ITEMS_JSON}. Сначала запусти update_items.py."
@@ -118,11 +132,17 @@ def load_item_ids() -> list[str]:
 
 
 def utc_now_iso() -> str:
+    """Текущее время UTC в формате ISO-8601 (для меток в БД)."""
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def api_get_json(url: str, params: dict, item_id: str, use_rate_limit: bool = True) -> dict:
-    """GET с rate limit, retry на 429 и сетевые ошибки.[cite: 6]"""
+    """GET к API с повторными попытками и соблюдением лимитов.
+
+    - при 429 ждёт Retry-After (или экспоненциальную паузу) до MAX_RETRIES_429;
+    - при сетевых ошибках повторяет с возрастающей паузой до MAX_RETRIES;
+    - уважает флаг _shutdown (аварийный выход с InterruptedError).
+    """
     attempt_429 = 0
     attempt_other = 0
     while True:
@@ -156,7 +176,7 @@ def api_get_json(url: str, params: dict, item_id: str, use_rate_limit: bool = Tr
 
 
 def set_collector_status(status_text: str) -> None:
-    """Записывает текущий статус парсера в БД для вывода на сайт."""
+    """Пишет текущий статус сбора в БД (collector_state) — его видно на сайте."""
     try:
         conn = sqlite3.connect(ACTIVE_DB, timeout=10)
         conn.execute("CREATE TABLE IF NOT EXISTS collector_state (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
@@ -170,34 +190,41 @@ def set_collector_status(status_text: str) -> None:
         log.error("Не удалось записать статус в БД: %s", e)
 
 
-# ---- Brain trigger ----
+# ---- Связь с сервером и мозгом ----
+# _brain_lock и _brain_inited не дают запустить второй параллельный полный
+# пересчёт мозга, пока первый ещё выполняется (см. trigger_brain_recompute).
 
 _brain_lock = threading.Lock()
 _brain_inited = False
 
 
 def notify_server() -> None:
-    """Уведомляет сервер (server.py), что активные лоты обновлены.
-    Сервер рассылает SSE-событие всем открытым вкладкам, чтобы сайт
-    обновил данные без опроса. Если сервер не запущен — молча пропускаем."""
+    """Сообщает server.py, что активные лоты обновились (SSE-сигнал сайту).
+
+    Сервер разошлёт 'data-updated' всем открытым вкладкам — сайт перезагрузит
+    данные без опроса. Если сервер не запущен — молча пропускаем (не критично).
+    """
     try:
         requests.post("http://127.0.0.1:8000/api/notify", timeout=2)
     except Exception:
         pass  # сервер может быть не запущен — это не критично
 
 
-# ---- Прогресс скана/расчёта для полоски на сайте ----
-# total/fetched считает job_active_lots (главный поток), computed — прибавляет
-# brain_worker_loop (отдельный поток) по мере готовности пачек. Общий словарь
-# под одним локом, т.к. пишут из двух потоков.
+# ---- Прогресс скана для полоски на сайте ----
+# total/fetched пишет job_active_lots (главный поток), computed — прибавляет
+# brain_worker_loop (фоновый поток) по мере готовности пачек. Словарь общий
+# для двух потоков, поэтому все изменения — под одним локом.
 _progress_lock = threading.Lock()
 _progress_state = {"total": 0, "fetched": 0, "computed": 0}
 
 
 def notify_progress(active: bool) -> None:
-    """Шлёт лёгкий тик прогресса на сервер — НЕ вызывает полную перезагрузку
-    данных на фронте (в отличие от notify_server/broadcast_update), только
-    обновляет полоску прогресса. Не критично, если сервер не запущен."""
+    """Шлёт на сервер лёгкий тик прогресса (total/fetched/computed).
+
+    НЕ вызывает полную перезагрузку данных на сайте (в отличие от
+    notify_server) — только обновляет полоску прогресса. Если сервер
+    не запущен — пропускаем.
+    """
     with _progress_lock:
         payload = dict(_progress_state)
     payload["active"] = active
@@ -208,11 +235,12 @@ def notify_progress(active: bool) -> None:
 
 
 def trigger_brain_recompute() -> None:
-    """Запускает brain.recompute_all() в фоновом потоке — полный пересчёт,
-    используется как страховка (например после --once) или вручную.
-    Основной путь обновления теперь — mark_dirty() + brain_worker_loop
-    (см. ниже), они пересчитывают только изменившиеся айтемы сразу по мере
-    готовности, не дожидаясь конца всего цикла опроса."""
+    """Запускает ПОЛНЫЙ пересчёт мозга (recompute_all) в фоновом потоке.
+
+    Страховочный путь (после --once или вручную). Основной путь обновления —
+    mark_dirty() + brain_worker_loop ниже: они пересчитывают только изменённые
+    предметы сразу по мере готовности, не дожидаясь конца всего цикла опроса.
+    """
     global _brain_inited
     if not _brain_inited:
         brain_module.setup_logging()
@@ -234,15 +262,15 @@ def trigger_brain_recompute() -> None:
 
 
 # ===========================================================================
-# Инкрементальный пересчёт мозга: "получили лоты по айтему — сразу посчитали"
+# Инкрементальный пересчёт мозга
 # ===========================================================================
-# Вместо ожидания конца ВСЕГО цикла опроса (может занимать минуты для ~100
-# артефактов), каждый айтем, как только его лоты записаны в БД, помечается
-# "грязным". Отдельный фоновый поток с небольшим дебаунсом (DIRTY_DEBOUNCE_SEC)
-# собирает пачку айтемов, готовых почти одновременно (параллельные воркеры),
-# и просит brain.py пересчитать только их — без глобального DELETE/пересчёта.
+# Идея: не ждать конца ВСЕГО цикла опроса (для ~100 предметов это минуты).
+# Как только лоты предмета записаны в БД — предмет помечается «грязным»
+# (mark_dirty). Фоновый поток с коротким дебаунсом (DIRTY_DEBOUNCE_SEC)
+# собирает пачку предметов, готовых почти одновременно (параллельные воркеры),
+# и просит brain.py пересчитать только их — без глобального пересчёта.
 
-DIRTY_DEBOUNCE_SEC = 1.5  # пауза сборки пачки после первого "грязного" айтема
+DIRTY_DEBOUNCE_SEC = 1.5  # пауза сборки пачки после первого «грязного» предмета
 
 _dirty_items: set[str] = set()
 _dirty_lock = threading.Lock()
@@ -250,18 +278,21 @@ _dirty_event = threading.Event()
 
 
 def mark_dirty(item_id: str) -> None:
-    """Помечает айтем как требующий пересчёта мозгом и будит фоновый воркер."""
+    """Помечает предмет как требующий пересчёта мозгом и будит фоновый воркер."""
     with _dirty_lock:
         _dirty_items.add(item_id)
     _dirty_event.set()
 
 
 def brain_worker_loop() -> None:
-    """Фоновый поток: ждёт появления грязных айтемов, даёт короткую паузу на
-    сборку пачки (пока параллельные воркеры допишут свои результаты), затем
-    просит brain.py пересчитать только эту пачку. Если пересчёт не удался
-    (например, лок занят полным пересчётом в другом процессе) — айтемы
-    возвращаются в очередь и будут подхвачены следующим циклом."""
+    """Фоновый поток инкрементального пересчёта мозга.
+
+    Ждёт появления «грязных» предметов, даёт короткую паузу на сборку пачки
+    (пока параллельные воркеры допишут свои результаты), затем просит brain.py
+    пересчитать только эту пачку. Если пересчёт не удался (например, лок занят
+    полным пересчётом в другом процессе) — предметы возвращаются в очередь и
+    будут подхвачены следующим циклом.
+    """
     global _brain_inited
     if not _brain_inited:
         brain_module.setup_logging()
@@ -303,25 +334,33 @@ def brain_worker_loop() -> None:
 
 
 # ===========================================================================
-# Job 1: история продаж (topup)[cite: 6]
+# Job 1: история продаж (режим topup)
 # ===========================================================================
 
 def sanitize_table_name(item_id: str) -> str:
+    """Превращает ID предмета в имя таблицы истории 'hist_<id>' (безопасно для SQL)."""
     safe = "".join(ch if ch.isalnum() else "_" for ch in item_id)
     return f"hist_{safe}"
 
 
 def parse_time(ts: str) -> datetime:
+    """Парсит ISO-время из API ('Z' → часовой пояс UTC)."""
     return datetime.fromisoformat(ts.replace("Z", "+00:00"))
 
 
 def fetch_history_page(item_id: str, offset: int) -> dict:
+    """Одна страница истории продаж предмета с API (LIMIT записей)."""
     url = f"{BASE_URL}/{REGION}/auction/{item_id}/history"
     params = {"additional": "true", "limit": LIMIT, "offset": offset}
     return api_get_json(url, params, item_id, use_rate_limit=True)
 
 
 def record_exists_in_db(table: str, row: dict) -> bool:
+    """Проверяет, есть ли уже в БД продажа, полностью совпадающая с row.
+
+    Сравнение идёт по всем полям (time, price, qlt, ptn и т.д.), чтобы точно
+    определить, что страница уже была загружена ранее (для остановки topup).
+    """
     try:
         conn = sqlite3.connect(HISTORY_DB, timeout=30)
         conn.execute("PRAGMA busy_timeout=30000;")
@@ -395,6 +434,12 @@ _HISTORY_UNIQUE_INDEX = """
 
 
 def history_writer_loop() -> None:
+    """Фоновый поток-«писатель»: принимает пачки истории из очереди и пишет их в БД.
+
+    Таблица под каждый предмет создаётся при первом появлении; уникальный индекс
+    гарантирует, что повторные страницы (INSERT OR IGNORE) не создадут дублей.
+    Отдельный поток нужен, чтобы воркеры с API не блокировались на записи.
+    """
     conn = sqlite3.connect(HISTORY_DB, timeout=30)
     conn.execute("PRAGMA journal_mode=WAL;")
     conn.execute("PRAGMA busy_timeout=30000;")
@@ -426,6 +471,13 @@ def history_writer_loop() -> None:
 
 
 def collect_item_history_topup(item_id: str) -> str:
+    """Дособирает историю продаж одного предмета до момента «уже в БД».
+
+    Идёт по страницам API от новых к старым и прекращает работу, когда:
+    страница неполная, попали в прошлое раньше CUTOFF_DATE или встретили
+    запись, которая уже лежит в БД (topup). Пачки строк отправляются
+    в очередь для фонового writer'а.
+    """
     table = sanitize_table_name(item_id)
     offset = 0
     pages = 0
@@ -482,6 +534,11 @@ def collect_item_history_topup(item_id: str) -> str:
 
 
 def job_history() -> None:
+    """Job «история продаж»: параллельный topup всех предметов + запись в БД.
+
+    Запускает N потоков-воркеров (по одному на предмет) и один фоновый
+    писатель. Защищён локом — не запустится, пока предыдущий прогон идёт.
+    """
     if not _history_lock.acquire(blocking=False):
         log.warning("job_history: предыдущий прогон ещё идёт, пропуск")
         return
@@ -508,7 +565,7 @@ def job_history() -> None:
                     failed.append(iid)
 
         if failed:
-            log.warning("Ошибки по %d артеfактам: %s", len(failed), failed[:10])
+            log.warning("Ошибки по %d артефактам: %s", len(failed), failed[:10])
 
         _history_write_queue.join()
         _history_write_queue.put(_HISTORY_STOP)
@@ -521,7 +578,7 @@ def job_history() -> None:
 
 
 # ===========================================================================
-# Job 2: активные лоты (атомарный снимок)[cite: 6]
+# Job 2: активные лоты (атомарный снимок)
 # ===========================================================================
 
 _ACTIVE_SCHEMA = """
@@ -595,6 +652,11 @@ ON CONFLICT(lot_key) DO UPDATE SET
 
 
 def migrate_active_schema(conn: sqlite3.Connection) -> None:
+    """Доводит схему active_lots до актуальной (добавляет недостающие колонки).
+
+    Для старых БД, созданных до появления lot_key/status: добавляет колонки,
+    заполняет lot_key для уже существующих строк и делает их уникальными.
+    """
     columns = [row[1] for row in conn.execute("PRAGMA table_info(active_lots)")]
     if "lot_key" not in columns:
         conn.execute("ALTER TABLE active_lots ADD COLUMN lot_key TEXT NOT NULL DEFAULT ''")
@@ -632,12 +694,14 @@ def migrate_active_schema(conn: sqlite3.Connection) -> None:
 
 
 def init_active_db(conn: sqlite3.Connection) -> None:
+    """Создаёт схему active_lots (если её нет) и применяет миграции."""
     conn.executescript(_ACTIVE_SCHEMA)
     conn.commit()
     migrate_active_schema(conn)
 
 
 def fetch_lots_page(item_id: str, offset: int) -> dict:
+    """Одна страница активных лотов предмета с API (LIMIT записей)."""
     url = f"{BASE_URL}/{REGION}/auction/{item_id}/lots"
     params = {
         "additional": "true",
@@ -646,11 +710,13 @@ def fetch_lots_page(item_id: str, offset: int) -> dict:
         "sort": SORT,
         "order": ORDER,
     }
-    # Отключаем rate limit, работаем через естественную задержку потоков
+    # Rate limit здесь не ждём: параллельные воркеры сами создают естественную
+    # задержку между запросами разных предметов.
     return api_get_json(url, params, item_id, use_rate_limit=False)
 
 
 def fetch_all_lots_for_item(item_id: str) -> list[dict]:
+    """Собирает ВСЕ активные лоты предмета (все страницы) в один список."""
     collected: list[dict] = []
     offset = 0
     while True:
@@ -667,6 +733,11 @@ def fetch_all_lots_for_item(item_id: str) -> list[dict]:
 
 
 def lot_key(lot: dict, item_id: str) -> str | None:
+    """Уникальный ключ лота: '{item_id}|{startTime}|{endTime}|qlt={qlt}'.
+
+    Используется для UPSERT активных лотов. None — если у лота нет startTime
+    или endTime (такие лоты пропускаются).
+    """
     additional = lot.get("additional", {}) or {}
     qlt = additional.get("qlt")
     start_time = lot.get("startTime")
@@ -679,6 +750,11 @@ def lot_key(lot: dict, item_id: str) -> str | None:
 
 
 def lot_to_row(lot: dict, item_id: str, run_id: int, now: str) -> dict | None:
+    """Преобразует лот из API в строку для записи в active_lots.
+
+    Пропускает лоты без ключа (нет времени) и без цены выкупа (нет смысла
+    торговать). Неизвестные поля additional сохраняются в extra_json.
+    """
     additional = lot.get("additional", {}) or {}
     key = lot_key(lot, item_id)
     if key is None:
@@ -715,6 +791,7 @@ def lot_to_row(lot: dict, item_id: str, run_id: int, now: str) -> dict | None:
 
 
 def record_failed_active_run(conn: sqlite3.Connection, started_at: str, error_msg: str) -> None:
+    """Фиксирует провал сбора активных лотов: запись в fetch_runs + текст ошибки."""
     conn.execute(
         "INSERT INTO fetch_runs (started_at, finished_at, lots_count, status) VALUES (?, ?, 0, 'error')",
         (started_at, utc_now_iso()),
@@ -727,6 +804,13 @@ def record_failed_active_run(conn: sqlite3.Connection, started_at: str, error_ms
 
 
 def job_active_lots() -> None:
+    """Job «активные лоты»: параллельный опрос всех предметов и запись снимка.
+
+    Лоты пишутся в БД сразу по мере готовности каждого предмета, а предмет
+    помечается «грязным» для инкрементального пересчёта мозга. Пропавшие лоты
+    помечаются status='gone' (по каждому предмету отдельно, а не по run'у разом —
+    иначе лоты ещё не опрошенных предметов ошибочно стали бы «пропавшими»).
+    """
     if not _active_lock.acquire(blocking=False):
         log.warning("job_active_lots: предыдущий прогон ещё идёт, пропуск")
         return
@@ -879,13 +963,21 @@ def run_once(mode: str | None) -> None:
             log.exception("Ошибка в brain recompute (--once)")
 
 
-# ---- Конфиг интервалов ----
+# ---- Интервалы демона ----
 HISTORY_INTERVAL_SEC = 3600  # 1 час между обновлениями истории
 BUFFER_DELAY_SEC = 60        # 1 минута паузы между фазами
-ACTIVE_INTERVAL_SEC = 60     # Интревал сканирования активных лотов
+ACTIVE_INTERVAL_SEC = 60     # интервал сканирования активных лотов
 
 
 def daemon_loop() -> None:
+    """Главный цикл коллектора (режим демона).
+
+    Последовательный режим: при старте — авто-очистка проданных лотов от
+    прошлой сессии и первичный досбор истории; далее бесконечный цикл, где
+    раз в час обновляется история, а между этим каждую минуту сканируются
+    активные лоты. Фоновый воркер мозга пересчитывает предметы по мере
+    готовности (mark_dirty → brain_worker_loop).
+    """
     log.info(
         "Daemon запущен (последовательный режим: история раз в %d сек, буфер %d сек)",
         HISTORY_INTERVAL_SEC, BUFFER_DELAY_SEC,
@@ -897,7 +989,7 @@ def daemon_loop() -> None:
     threading.Thread(target=brain_worker_loop, daemon=True, name="brain-worker").start()
 
     # ----------------------------------------------------
-    # 1. СТАРТ: Первый прогон истории при запуске
+    # 1. СТАРТ: первый прогон истории при запуске
     # ----------------------------------------------------
     # Авто-очистка проданных лотов от прошлой сессии
     try:
@@ -914,7 +1006,7 @@ def daemon_loop() -> None:
     log.info("=== [СТАРТ] Первоначальное дособирание истории ===")
     set_collector_status("Старт: проверка и досбор истории...")
     job_history()
-    
+
     last_history_time = time.monotonic()
 
     # Пауза в 1 минуту перед началом сканирования активных
@@ -933,8 +1025,8 @@ def daemon_loop() -> None:
         if now - last_history_time >= HISTORY_INTERVAL_SEC:
             log.info("=== [ЧАСОВОЙ ЦИКЛ] Начинаем плановое обновление истории ===")
             set_collector_status("Часовой сбор истории...")
-            
-            # Выполняем сбор истории СИНХРОННО (без потоков)
+
+            # Сбор истории выполняем СИНХРОННО, чтобы не смешивать с активными
             job_history()
             last_history_time = time.monotonic()
 
@@ -949,7 +1041,7 @@ def daemon_loop() -> None:
             cycle_start = time.monotonic()
             job_active_lots()
 
-            # Вычисляем оставшееся время до конца 60-секундного цикла
+            # Досыпаем до конца 60-секундного цикла
             elapsed = time.monotonic() - cycle_start
             sleep_time = max(0.0, ACTIVE_INTERVAL_SEC - elapsed)
 
@@ -961,11 +1053,13 @@ def daemon_loop() -> None:
 
 
 def _handle_signal(signum, _frame) -> None:
+    """Обработчик Ctrl+C/SIGTERM: ставит флаг остановки, чтобы циклы завершились."""
     log.info("Получен сигнал %s, завершение...", signum)
     _shutdown.set()
 
 
 def main() -> None:
+    """Точка входа: разбор аргументов и запуск --once или демона."""
     setup_logging()
 
     parser = argparse.ArgumentParser(description="STALZONE auction data collector")

@@ -1,3 +1,30 @@
+"""HTTP-сервер трекера аукциона: отдаёт сайт, JSON-API и SSE-уведомления.
+
+Единственный интерфейс между браузером и данными проекта. Раздаёт статику
+из web/ (index.html, css, js, иконки) и обслуживает API.
+
+GET-эндпоинты:
+    /                           — интерфейс трекера (web/index.html)
+    /api/auction-data           — активные лоты + справочник предметов + score мозга
+    /api/history/<item_id>      — история продаж предмета (для графика)
+    /api/brain-config           — текущий конфиг мозга (пороги, формулы)
+    /api/scan-progress          — прогресс текущего цикла сбора/расчёта
+    /api/events                 — SSE-канал: 'data-updated' (данные изменились)
+                                  и 'scan-progress' (лёгкий тик прогресса)
+
+POST-эндпоинты:
+    /api/notify                     — collector сообщает, что лоты обновились
+    /api/scan-progress              — collector шлёт прогресс скана/расчёта
+    /api/clear-gone                 — удалить проданные лоты (кнопка на сайте)
+    /api/brain-config               — сохранить новый конфиг мозга и запросить пересчёт
+    /api/brain-config/reset-cache   — сбросить кэш мозга и пересчитать всё
+
+Источники данных: БД в data/ (active/history/scores), конфиг config/.
+Связь с мозгом — через кэш auction_scores.sqlite3 и флаг force_recompute.
+
+Запуск: python src/server.py  (открывает http://127.0.0.1:8000/)
+"""
+
 from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
 import json
 import os
@@ -25,23 +52,35 @@ BRAIN_CONFIG_PATH = os.path.join(BASE_DIR, "config", "brain_config.json")
 
 
 def sanitize_table_name(item_id: str) -> str:
+    """Превращает ID предмета в безопасное имя таблицы истории 'hist_<id>'.
+
+    В auction_history.sqlite3 каждому предмету соответствует своя таблица
+    'hist_<item_id>'. ID очищается от не-алфавитно-цифровых символов, чтобы
+    его можно было безопасно подставлять в SQL-запросы.
+    """
     safe = "".join(ch if ch.isalnum() else "_" for ch in item_id)
     return f"hist_{safe}"
 
 
-# Подключённые SSE-клиенты (браузеры). Защищено lock'ом.
+# SSE-подключённые браузеры (wfile каждого клиента). Общий список, потому что
+# события шлют сразу несколько потоков (коллектор, сайт) — защищено lock'ом.
 _sse_clients: deque = deque()
 _sse_lock = threading.Lock()
 
-# Текущий прогресс скана/расчёта — держим последнее известное состояние в
-# памяти, чтобы вкладка, открытая посреди цикла, сразу увидела актуальную
-# картину (не только новые тики через SSE).
+# Последнее известное состояние прогресса скана/расчёта (total/fetched/computed).
+# Храним в памяти, чтобы вкладка, открытая посреди цикла, сразу увидела
+# актуальную картину, а не только новые тики через SSE.
 _scan_progress: dict = {"total": 0, "fetched": 0, "computed": 0, "active": False}
 _scan_progress_lock = threading.Lock()
 
 
 def get_last_active_run() -> str | None:
-    """Время последнего успешного снимка активных лотов (коллектор)."""
+    """Возвращает время последнего успешного сбора активных лотов.
+
+    Значение берётся из таблицы collector_state (её пишет collector.py) и
+    показывается на сайте как индикатор свежести данных. None — если сбора
+    ещё не было.
+    """
     try:
         conn = sqlite3.connect(ACTIVE_DB, timeout=10)
         row = conn.execute(
@@ -54,7 +93,11 @@ def get_last_active_run() -> str | None:
 
 
 def broadcast_update() -> None:
-    """Рассылает SSE-событие 'data-updated' всем подключённым браузерам."""
+    """Рассылает SSE-событие 'data-updated' всем открытым браузерам.
+
+    Сигнал фронту полностью перезагрузить данные (вызывается после обновления
+    активных лотов или очистки проданных). Отвалившиеся клиенты удаляются.
+    """
     with _sse_lock:
         stale = []
         for wfile in _sse_clients:
@@ -68,9 +111,11 @@ def broadcast_update() -> None:
 
 
 def broadcast_progress(payload: dict) -> None:
-    """Рассылает SSE-событие 'scan-progress' — лёгкий тик прогресса скана/
-    расчёта (total/fetched/computed), НЕ вызывает полную перезагрузку
-    данных на фронте (в отличие от 'data-updated')."""
+    """Рассылает лёгкое SSE-событие 'scan-progress' (total/fetched/computed).
+
+    В отличие от 'data-updated' фронт НЕ перезагружает лоты целиком, а лишь
+    обновляет полоску прогресса — событие можно слать часто и без нагрузки.
+    """
     data = json.dumps(payload, ensure_ascii=False)
     message = f"event: scan-progress\ndata: {data}\n\n".encode("utf-8")
     with _sse_lock:
@@ -86,6 +131,11 @@ def broadcast_progress(payload: dict) -> None:
 
 
 def load_items() -> dict:
+    """Читает справочник предметов data/items.json: {item_id: {name, icon, ...}}.
+
+    Справочник уходит на фронт вместе с лотами (поле 'items'), чтобы сайт мог
+    показывать названия и иконки предметов.
+    """
     if not os.path.exists(ITEMS_PATH):
         return {}
     with open(ITEMS_PATH, "r", encoding="utf-8") as fh:
@@ -93,8 +143,12 @@ def load_items() -> dict:
 
 
 def load_scores() -> dict[str, dict]:
-    """Кэш brain.py: lot_key -> {fairValue, absoluteProfit, ...}. Пусто, если
-    brain.py ещё ни разу не отработал (auction_scores.sqlite3 нет)."""
+    """Читает кэш результатов brain.py: lot_key -> {fairValue, score, ...}.
+
+    Если auction_scores.sqlite3 ещё не существует (мозг ни разу не отработал) —
+    вернёт {}. При устаревшей схеме таблицы (без новых колонок) используются
+    дефолтные значения для недостающих полей.
+    """
     if not os.path.exists(SCORES_DB):
         return {}
 
@@ -167,7 +221,10 @@ def load_scores() -> dict[str, dict]:
 
 
 def count_active_lots() -> int:
-    """Сколько активных лотов в active_lots (status='active', до фильтра мозга)."""
+    """Число активных лотов в снимке коллектора (status='active').
+
+    Показывается на сайте как «всего лотов на аукционе» — до фильтрации мозгом.
+    """
     if not os.path.exists(ACTIVE_DB):
         return 0
     conn = sqlite3.connect(ACTIVE_DB)
@@ -179,10 +236,13 @@ def count_active_lots() -> int:
 
 
 def load_active_lots(mode: str = "scored") -> list[dict]:
-    """mode='scored' (дефолт) — отдаёт все лоты со score-полями, отсортированные
-    по score. Лоты, не прошедшие фильтр brain.py, НЕ скрываются — отсеивание
-    выполняется на сайте. mode='all' — все лоты со score-полями (может быть
-    None, если brain.py ещё не посчитал конкретный лот/сегмент)."""
+    """Читает активные лоты и джойнит к ним score от brain.py.
+
+    mode='scored' (по умолчанию) — отдаёт лоты, прошедшие фильтр мозга
+    (score.passFilter), отсортированные по score; проданные (status='gone')
+    показываются всегда. mode='all' — все лоты без отсечения (score может
+    быть None, если мозг ещё не посчитал сегмент).
+    """
     if not os.path.exists(ACTIVE_DB):
         return []
 
@@ -252,6 +312,12 @@ def load_active_lots(mode: str = "scored") -> list[dict]:
 
 
 def load_history_for_item(item_id: str, hours: int = 24) -> list[dict]:
+    """История продаж предмета за последние N часов (для графика на сайте).
+
+    Читает таблицу hist_<item_id> из auction_history.sqlite3. Возвращает
+    записи {price, time, qlt, ptn, ...} по возрастанию времени. Пустой список,
+    если таблицы нет или БД отсутствует.
+    """
     if not os.path.exists(HISTORY_DB):
         return []
 
@@ -290,6 +356,11 @@ def load_history_for_item(item_id: str, hours: int = 24) -> list[dict]:
 
 
 def build_payload(mode: str = "scored") -> dict:
+    """Собирает полный ответ для /api/auction-data одним JSON.
+
+    Содержит справочник предметов, активные лоты (со score мозга), общее число
+    лотов, готовность мозга, время последнего сбора и метку времени ответа.
+    """
     return {
         "items": load_items(),
         "lots": load_active_lots(mode=mode),
@@ -301,6 +372,7 @@ def build_payload(mode: str = "scored") -> dict:
 
 
 def load_brain_config() -> dict:
+    """Читает конфиг мозга config/brain_config.json (пороги, формулы, фильтры)."""
     if not os.path.exists(BRAIN_CONFIG_PATH):
         return {}
     with open(BRAIN_CONFIG_PATH, "r", encoding="utf-8") as fh:
@@ -308,16 +380,19 @@ def load_brain_config() -> dict:
 
 
 def save_brain_config(cfg: dict) -> None:
+    """Сохраняет новый конфиг мозга в config/brain_config.json."""
     with open(BRAIN_CONFIG_PATH, "w", encoding="utf-8") as fh:
         json.dump(cfg, fh, ensure_ascii=False, indent=2)
 
 
 def request_brain_recompute() -> None:
-    """Просит brain.py пересчитать при следующем поллинге, не удаляя кэш —
-    используется после сохранения конфига, чтобы новые пороги/формулы
-    применились сразу, а не ждали следующего обновления active_lots."""
+    """Просит brain.py пересчитать всё на следующем цикле, не сбрасывая кэш.
+
+    Используется после сохранения конфига с сайта, чтобы новые пороги и формулы
+    применились сразу, а не ждали следующего обновления активных лотов.
+    """
     if not os.path.exists(SCORES_DB):
-        return  # brain.py ещё ни разу не запускался — само пересчитает при первом запуске
+        return  # мозг ещё ни разу не запускался — пересчитает сам при первом старте
     conn = sqlite3.connect(SCORES_DB)
     try:
         conn.execute(
@@ -332,9 +407,12 @@ def request_brain_recompute() -> None:
 
 
 def reset_brain_cache() -> None:
-    """То же самое, что 'python brain.py --reset-cache', но вызывается прямо
-    с сайта: чистит кэш fair value и просит brain.py пересчитать всё заново
-    на следующем цикле опроса (см. brain.py: needs_recompute/force_recompute)."""
+    """Полный сброс кэша мозга по кнопке на сайте.
+
+    Аналог 'python src/brain.py --reset-cache': удаляет fair value и score из
+    auction_scores.sqlite3 и выставляет флаг force_recompute, чтобы мозг
+    пересчитал всё с нуля на следующем цикле.
+    """
     conn = sqlite3.connect(SCORES_DB)
     try:
         conn.execute(
@@ -351,19 +429,32 @@ def reset_brain_cache() -> None:
 
 
 def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
+    """Проверяет, есть ли таблица с именем name в SQLite-базе."""
     return conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table' AND name=?", (name,)
     ).fetchone() is not None
 
 
 def _query_params(parsed) -> dict[str, str]:
+    """Разбирает query-строку URL ('a=1&b=2') в словарь {'a': '1', 'b': '2'}."""
     if not parsed.query:
         return {}
     return dict(qp.split("=", 1) for qp in parsed.query.split("&") if "=" in qp)
 
 
 class AuctionHandler(SimpleHTTPRequestHandler):
+    """HTTP-хендлер трекера: маршрутизирует /api/* и раздаёт статику.
+
+    GET: JSON-эндпоинты (auction-data, history, brain-config, scan-progress),
+    SSE-канал /api/events, а для всего остального — статику из web/ через
+    super().do_GET() (index.html, css, js, иконки).
+
+    POST: приём уведомлений от collector (notify, scan-progress), действий
+    сайта (clear-gone, brain-config, reset-cache).
+    """
+
     def _send_json(self, payload: dict, status: int = 200) -> None:
+        """Отправляет клиенту JSON-ответ с корректным charset и длиной."""
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -372,7 +463,11 @@ class AuctionHandler(SimpleHTTPRequestHandler):
         self.wfile.write(body)
 
     def _handle_sse(self) -> None:
-        """Держит SSE-соединение открытым, регистрирует клиента."""
+        """Открывает долгоживущее SSE-соединение с браузером.
+
+        Регистрирует клиента в общем списке и удерживает поток, шлёт keep-alive
+        каждые 20 секунд, пока браузер не отключится (тогда клиент удаляется).
+        """
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream; charset=utf-8")
         self.send_header("Cache-Control", "no-cache")
@@ -394,6 +489,7 @@ class AuctionHandler(SimpleHTTPRequestHandler):
                     _sse_clients.remove(self.wfile)
 
     def do_GET(self) -> None:
+        """Обрабатывает GET: JSON-API и SSE — здесь, остальное — статика."""
         parsed = urlparse(self.path)
         params = _query_params(parsed)
 
@@ -428,20 +524,20 @@ class AuctionHandler(SimpleHTTPRequestHandler):
         return super().do_GET()
 
     def do_POST(self) -> None:
+        """Обрабатывает POST: уведомления коллектора и действия с сайта."""
         parsed = urlparse(self.path)
 
         if parsed.path == "/api/notify":
-            # Коллектор уведомил: активные лоты обновлены — рассылаем SSE
+            # Коллектор сообщает, что активные лоты обновились — будим фронт
             broadcast_update()
             self._send_json({"ok": True})
             return
 
         if parsed.path == "/api/scan-progress":
-            # Коллектор шлёт лёгкий тик прогресса (total/fetched/computed) —
-            # обновляем состояние в памяти и рассылаем НЕ 'data-updated'
-            # (тот дёргает полную перезагрузку лотов), а отдельное лёгкое
-            # событие 'scan-progress', чтобы полоска обновлялась плавно и
-            # часто, без лишней нагрузки на фронт.
+            # Коллектор шлёт лёгкий тик прогресса (total/fetched/computed).
+            # Рассылаем НЕ 'data-updated' (тот дёргает полную перезагрузку лотов),
+            # а лёгкое событие 'scan-progress', чтобы полоска обновлялась часто,
+            # без лишней нагрузки на фронт.
             length = int(self.headers.get("Content-Length", 0) or 0)
             body = self.rfile.read(length) if length else b"{}"
             try:
@@ -458,7 +554,7 @@ class AuctionHandler(SimpleHTTPRequestHandler):
             return
 
         if parsed.path == "/api/clear-gone":
-            # Очистка проданных лотов (status='gone') — вызывается кнопкой с сайта
+            # Кнопка на сайте: вычистить лоты, помеченные коллектором как проданные
             conn = sqlite3.connect(ACTIVE_DB)
             try:
                 deleted = conn.execute("DELETE FROM active_lots WHERE status = 'gone'").rowcount
@@ -491,6 +587,7 @@ class AuctionHandler(SimpleHTTPRequestHandler):
 
 
 def open_chrome():
+    """Открывает трекер в Chrome (или браузере по умолчанию) после старта сервера."""
     time.sleep(1)
     url = f"http://127.0.0.1:{PORT}/"
 
@@ -505,6 +602,7 @@ def open_chrome():
 
 
 def main() -> None:
+    """Точка входа: открывает браузер и запускает HTTP-сервер на порту 8000."""
     threading.Thread(target=open_chrome, daemon=True).start()
     print(f"Сервер запущен: http://127.0.0.1:{PORT}", flush=True)
     ThreadingHTTPServer(

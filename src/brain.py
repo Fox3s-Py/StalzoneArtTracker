@@ -1,38 +1,34 @@
-"""
-"Мозг" аукциона STALZONE — аналитический демон поверх данных collector.py.
+"""«Мозг» аукциона STALZONE — аналитический слой поверх данных коллектора.
 
-Не собирает данные сам, а обрабатывает то, что уже лежит в:
-    auction_history.sqlite3  (история продаж, пишет job_history)
-    auction_active.sqlite3   (снимок активных лотов, пишет job_active_lots)
+Сам данных не собирает, а обрабатывает то, что уже лежит в БД:
+- auction_history.sqlite3 — история продаж (её пишет collector.job_history);
+- auction_active.sqlite3  — снимок активных лотов (пишет job_active_lots).
 
-Считает по сегменту (item_id, qlt[, ptn]) справедливую цену (fair value) и
-ликвидность из истории, затем по каждому активному лоту — профит и score,
-и складывает результат в отдельный кэш auction_scores.sqlite3, который
-server.py джойнит к active_lots при отдаче на фронт.
+Что делает:
+1. По сегменту (item_id, qlt[, ptn]) из истории считает справедливую цену
+   (fair value) и ликвидность с учётом времени продаж (затухание весов).
+2. Для каждого активного лота считает профит (absolute/percent), ожидаемое
+   время продажи (time-to-sell с поправкой на цену и конкурентов) и score.
+3. Результат складывает в кэш auction_scores.sqlite3, который server.py
+   джойнит к лотам при отдаче на сайт.
 
-Конфиг (пороги, формулы, фильтры) живёт в brain_config.json — файл читается
-заново на каждый прогон, чтобы правки с сайта (через /api/brain-config
-в server.py) применялись без перезапуска демона.
+Конфиг (пороги, формулы, фильтры) читается из config/brain_config.json на
+каждый прогон заново — правки с сайта (/api/brain-config) применяются без
+перезапуска демона.
 
-Пересчёт запускается двумя способами:
+Пересчёт запускается двумя путями:
+1. Инкрементально — collector помечает предметы через mark_dirty, а
+   recompute_for_items() пересчитывает только их.
+2. Полный recompute_all() — по флагу force_recompute (кнопка на сайте) либо
+   при смене last_active_run (поллинг каждые POLL_INTERVAL_SEC).
 
-1. **Прямой вызов из collector.py** — после каждого успешного снимка активных
-   лотов collector вызывает brain.recompute_all() в фоновом потоке, чтобы мозг
-   начинал обработку мгновенно, без ожидания таймера.
-
-2. **Polling (daemon-режим)** — если brain.py запущен как отдельный демон, он
-   проверяет collector_state.last_active_run и флаг force_recompute каждые
-   15 секунд. Это резервный механизм и обработка ручных изменений конфига
-   с сайта (force_recompute).
-
-Для защиты от одновременного выполнения (прямой вызов + daemon) используется
-блокировка recompute_lock в brain_state (см. recompute_all).
+От одновременного пересчёта защищают: threading.Lock внутри процесса и
+блокировка recompute_lock в brain_state между процессами.
 
 Запуск:
-    python brain.py              # daemon: следит за last_active_run, пересчитывает
-    python brain.py --once       # один пересчёт (по текущим данным) и выход
-    python brain.py --reset-cache  # сбросить кэш fair value и заставить
-                                    # пересчитать всё с нуля на следующем цикле
+    python src/brain.py                # daemon: следит за last_active_run
+    python src/brain.py --once         # один пересчёт по текущим данным
+    python src/brain.py --reset-cache  # сбросить кэш fair value и пересчитать всё
 """
 
 from __future__ import annotations
@@ -52,7 +48,7 @@ from pathlib import Path
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)  # type: ignore[attr-defined]
 
-# ---- Пути ----
+# ---- Пути и параметры ----
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -62,10 +58,10 @@ SCORES_DB = BASE_DIR / "data" / "auction_scores.sqlite3"
 CONFIG_PATH = BASE_DIR / "config" / "brain_config.json"
 LOG_FILE = BASE_DIR / "logs" / "brain.log"
 
-POLL_INTERVAL_SEC = 15  # как часто проверять, не обновился ли активный снимок
+POLL_INTERVAL_SEC = 15  # частота поллинга «появились ли новые активные лоты»
 
 # Защита от параллельного выполнения recompute_all внутри одного процесса
-# (например, прямой вызов из collector.py + daemon_loop в одном процессе).
+# (например, прямой вызов из collector.py + daemon_loop в том же процессе).
 _recompute_lock = threading.Lock()
 
 # ---- Logging ----
@@ -74,6 +70,7 @@ log = logging.getLogger("brain")
 
 
 def setup_logging() -> None:
+    """Настраивает логгер: вывод в консоль и в logs/brain.log."""
     log.setLevel(logging.INFO)
     fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
     sh = logging.StreamHandler(sys.stdout)
@@ -85,9 +82,12 @@ def setup_logging() -> None:
 
 
 # ===========================================================================
-# Конфиг — дефолты на случай отсутствия файла. Редактируется живьём через
-# server.py -> /api/brain-config. Комментарии к каждой настройке — здесь,
-# т.к. JSON не поддерживает комментарии.
+# Конфиг
+# ===========================================================================
+# DEFAULT_CONFIG — значения по умолчанию на случай отсутствия файла. Файл
+# редактируется «на живую» через server.py -> /api/brain-config. Подробные
+# комментарии к каждой настройке хранятся здесь, потому что JSON их не
+# поддерживает.
 # ===========================================================================
 
 DEFAULT_CONFIG = {
@@ -205,6 +205,13 @@ DEFAULT_CONFIG = {
 
 
 def load_config() -> dict:
+    """Читает brain_config.json и «смерживает» его с DEFAULT_CONFIG.
+
+    Файл читается на каждый прогон — правки с сайта применяются без
+    перезапуска. При отсутствии/битом JSON используется дефолтный конфиг.
+    Недостающие поля подтягиваются из дефолта, чтобы старые пользовательские
+    файлы автоматически получали новые настройки.
+    """
     if not CONFIG_PATH.exists():
         save_config(DEFAULT_CONFIG)
         return json.loads(json.dumps(DEFAULT_CONFIG))  # deep copy
@@ -214,8 +221,7 @@ def load_config() -> dict:
         log.error("Не удалось прочитать %s (%s), использую дефолтный конфиг", CONFIG_PATH, e)
         return json.loads(json.dumps(DEFAULT_CONFIG))
 
-    # неглубокий merge с дефолтом — чтобы новые поля конфига появлялись
-    # у уже существующих пользовательских brain_config.json автоматически
+    # Merge с дефолтом: вложенные секции тоже обновляем по ключам
     merged = json.loads(json.dumps(DEFAULT_CONFIG))
     for section, values in raw.items():
         if isinstance(values, dict) and section in merged:
@@ -234,12 +240,16 @@ def load_config() -> dict:
 
 
 def save_config(cfg: dict) -> None:
+    """Сохраняет конфиг в config/brain_config.json."""
     CONFIG_PATH.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 # ===========================================================================
-# Кэш-БД
+# Кэш-БД (auction_scores.sqlite3)
 # ===========================================================================
+# Хранит: справедливые цены по сегментам (item_fair_value), score по лотам
+# (lot_scores) и служебное состояние мозга (brain_state: last_processed_run,
+# force_recompute, recompute_lock).
 
 _SCORES_SCHEMA = """
 CREATE TABLE IF NOT EXISTS item_fair_value (
@@ -294,6 +304,11 @@ CREATE TABLE IF NOT EXISTS brain_state (
 
 
 def init_scores_db(conn: sqlite3.Connection) -> None:
+    """Создаёт схему кэша (если её нет) и добавляет недостающие колонки.
+
+    Миграции нужны для старых БД, созданных до появления новых полей
+    (market_cooling, blend_weight, extended_window, lambda_effective и др.).
+    """
     conn.executescript(_SCORES_SCHEMA)
     conn.commit()
 
@@ -323,29 +338,34 @@ def init_scores_db(conn: sqlite3.Connection) -> None:
 
 
 def get_state(conn: sqlite3.Connection, key: str) -> str | None:
+    """Читает служебное значение мозга из brain_state (None, если ключа нет)."""
     row = conn.execute("SELECT value FROM brain_state WHERE key=?", (key,)).fetchone()
     return row[0] if row else None
 
 
 def set_state(conn: sqlite3.Connection, key: str, value: str) -> None:
+    """Пишет служебное значение мозга в brain_state (upsert по ключу)."""
     conn.execute("INSERT OR REPLACE INTO brain_state (key, value) VALUES (?, ?)", (key, value))
     conn.commit()
 
 
 def utc_now_iso() -> str:
+    """Текущее время UTC в формате ISO-8601 (для меток в БД)."""
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 # ===========================================================================
-# Чтение исходных данных
+# Чтение исходных данных (БД коллектора)
 # ===========================================================================
 
 def sanitize_table_name(item_id: str) -> str:
+    """Превращает ID предмета в имя таблицы истории 'hist_<id>' (безопасно для SQL)."""
     safe = "".join(ch if ch.isalnum() else "_" for ch in item_id)
     return f"hist_{safe}"
 
 
 def get_active_last_run(conn: sqlite3.Connection) -> str | None:
+    """Время последнего сбора активных лотов коллектором (для проверки новизны)."""
     row = conn.execute(
         "SELECT value FROM collector_state WHERE key='last_active_run'"
     ).fetchone()
@@ -353,6 +373,7 @@ def get_active_last_run(conn: sqlite3.Connection) -> str | None:
 
 
 def load_item_ids() -> list[str]:
+    """Список ID предметов из справочника data/items.json (пусто, если файла нет)."""
     items_path = BASE_DIR / "data" / "items.json"
     if not items_path.exists():
         return []
@@ -360,6 +381,11 @@ def load_item_ids() -> list[str]:
 
 
 def load_active_lots(conn: sqlite3.Connection, item_ids: list[str] | None = None) -> list[sqlite3.Row]:
+    """Читает активные лоты (все или только указанных предметов).
+
+    Возвращает строки sqlite3.Row с полями lot_key, item_id, qlt, ptn,
+    buyout_price, fetch_run_id — нужный минимум для расчёта score.
+    """
     conn.row_factory = sqlite3.Row
     if item_ids:
         placeholders = ",".join("?" * len(item_ids))
@@ -380,6 +406,23 @@ def load_active_lots(conn: sqlite3.Connection, item_ids: list[str] | None = None
 
 @dataclass
 class FairValueResult:
+    """Итог расчёта справедливой цены для одного сегмента (item_id, qlt[, ptn]).
+
+    Атрибуты:
+        fair_value   — справедливая цена (None — данных нет/скрыт cold-start);
+        std_dev      — разброс цен продаж;
+        sale_count   — число продаж в сегменте, участвовавших в расчёте;
+        lambda_per_day — частота продаж в день (ликвидность сегмента);
+        confidence   — уверенность в fair_value (меньше разброс → выше);
+        segmentation — что реально легло в основу: exact/bracket/no_ptn/blend/none;
+        low_confidence — мало данных или пришлось откатиться на бракет;
+        market_cooling — признак «остывающего» рынка (короткое окно < длинного);
+        blend_weight — вес узкого сегмента в смеси (только при segmentation='blend');
+        weighted_prices — [(price, weight)] с экспоненциальным затуханием,
+                          нужен для S(X) в блоке 2 (time-to-sell);
+        extended_window — True, если точному ptn не хватило продаж и окно
+                          пришлось расширить по времени.
+    """
     fair_value: float | None
     std_dev: float
     sale_count: int
@@ -397,8 +440,10 @@ class FairValueResult:
 
 
 def weighted_percentile(pairs: list[tuple[float, float]], percentile: float) -> float:
-    """pairs = [(значение, вес), ...]. Возвращает значение на уровне percentile
-    (0-100) накопленного веса. percentile=50 — медиана."""
+    """Возвращает значение на уровне percentile (0–100) накопленного веса.
+
+    pairs — [(значение, вес), ...]. percentile=50 соответствует медиане.
+    """
     if not pairs:
         return 0.0
     ordered = sorted(pairs, key=lambda p: p[0])
@@ -415,8 +460,12 @@ def weighted_percentile(pairs: list[tuple[float, float]], percentile: float) -> 
 
 
 def trim_outliers(pairs: list[tuple[float, float]], trim_pct: float) -> list[tuple[float, float]]:
-    """1.2: отсечь верхние trim_pct% самых дорогих продаж (по накопленному весу).
-    Аномально дорогие панические покупки исключаются из выборки целиком."""
+    """Отсекает верхние trim_pct% самых дорогих продаж (по накопленному весу).
+
+    Аномально дорогие «панические» покупки исключаются из выборки целиком,
+    чтобы не задирали fair value. Пустой список не возвращается — при полном
+    отсечении отдаются исходные данные.
+    """
     if trim_pct <= 0 or not pairs:
         return pairs
     ordered = sorted(pairs, key=lambda p: p[0])
@@ -435,8 +484,12 @@ def trim_outliers(pairs: list[tuple[float, float]], trim_pct: float) -> list[tup
 
 
 def get_ptn_bracket(ptn: int | None, brackets: list[list[int]]) -> tuple[int, int] | None:
-    """Возвращает (low, high) бракета, в который попадает ptn, либо None
-    если ptn отсутствует (безточный предмет не участвует в бракетах)."""
+    """Возвращает границы (low, high) бонусного бракета, куда попадает ptn.
+
+    Бракеты в конфиге — это диапазоны заточки с одинаковым бонусом (например
+    [0,4], [5,9], [10,14], [15,15]). None — если ptn отсутствует (предмет без
+    заточки не участвует в бракетах).
+    """
     if ptn is None:
         return None
     for low, high in brackets:
@@ -449,8 +502,12 @@ def _query_segment_sales_bracket(
     hconn: sqlite3.Connection, table: str, qlt: int | None,
     bracket: tuple[int, int], window_days: int, limit: int,
 ) -> list[tuple[float, str]]:
-    """Продажи внутри одного бонусного бракета ptn (никогда не пересекает
-    границу бонуса), но по всем ptn внутри бракета."""
+    """Продажи сегмента по ВСЕМ ptn внутри одного бонусного бракета.
+
+    В отличие от точного ptn, запрос не пересекает границу бонуса: цены
+    внутри бракета (+4 и +5 — это разные по ценности уровни, смешивать нельзя).
+    Возвращает [(price, time)] в пределах window_days, не больше limit записей.
+    """
     cutoff = time.time() - window_days * 86400
     cutoff_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(cutoff))
     low, high = bracket
@@ -474,9 +531,12 @@ def _query_segment_sales_bracket(
 def find_next_threshold_ptn(
     ptn: int | None, brackets: list[list[int]], max_distance: int,
 ) -> int | None:
-    """Если ptn стоит близко (<= max_distance) к следующему бонусному порогу —
-    возвращает значение ptn этого порога (например 9 -> 10). Иначе None.
-    Только "вверх" (к следующему бонусу), не "вниз"."""
+    """Находит следующий бонусный порог заточки, если ptn близок к нему.
+
+    Например ptn=9 при пороге 10 и max_distance=1 → вернёт 10. Только «вверх»
+    (к следующему бонусу), не «вниз». Используется для информационного хинта
+    «соседний тир» на сайте. None — порога рядом нет или он максимальный.
+    """
     if ptn is None:
         return None
     bracket = get_ptn_bracket(ptn, brackets)
@@ -495,6 +555,12 @@ def _query_segment_sales(
     hconn: sqlite3.Connection, table: str, qlt: int | None, ptn: int | None,
     use_ptn: bool, window_days: int, limit: int,
 ) -> list[tuple[float, str]]:
+    """Продажи точного сегмента (item_id, qlt[, ptn]) за window_days.
+
+    use_ptn=True — фильтрует по конкретному ptn (или ptn IS NULL);
+    use_ptn=False — сегмент без заточки (qlt без учёта ptn).
+    Возвращает [(price, time)], не больше limit записей.
+    """
     cutoff = time.time() - window_days * 86400
     cutoff_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(cutoff))
 
@@ -521,7 +587,11 @@ def _query_segment_sales(
 
 
 def _build_weighted_pairs(rows: list[tuple[float, str]], decay_lambda: float) -> list[tuple[float, float]]:
-    """Превращает (price, time) в (price, weight) с экспоненциальным затуханием."""
+    """Превращает (price, time) в (price, weight) с экспоненциальным затуханием.
+
+    Чем старше продажа, тем меньше её вес: weight = exp(-decay_lambda * дни).
+    Это делает справедливую цену чувствительной к свежим продажам.
+    """
     now = time.time()
     weighted_pairs = []
     for price, ts in rows:
@@ -536,7 +606,11 @@ def _build_weighted_pairs(rows: list[tuple[float, str]], decay_lambda: float) ->
 
 
 def _compute_stats(prices: list[float], fair_value: float) -> tuple[float, float]:
-    """Возвращает (std_dev, confidence)."""
+    """Считает (std_dev, confidence) по ценам продаж.
+
+    confidence = 1/(1 + std_dev/fair_value): маленький разброс относительно
+    цены → уверенность близка к 1, большой разброс → уверенность падает.
+    """
     if not prices:
         return 0.0, 0.0
     mean_price = sum(prices) / len(prices)
@@ -549,15 +623,18 @@ def _compute_stats(prices: list[float], fair_value: float) -> tuple[float, float
 def _compute_fair_value_from_rows(
     rows: list[tuple[float, str]], fv_cfg: dict,
 ) -> tuple[float | None, float, float]:
-    """Считает fair value (перцентиль + обрезка выбросов) из строк продаж.
-    Возвращает (fair_value, std_dev, confidence)."""
+    """Считает fair value из сырых строк продаж: (fair_value, std_dev, confidence).
+
+    Алгоритм: затухание весов → обрезка выбросов (trim_outliers) → взвешенный
+    перцентиль (fair_value_percentile) → статистика. None — если продаж нет.
+    """
     if not rows:
         return None, 0.0, 0.0
 
     weighted_pairs = _build_weighted_pairs(rows, fv_cfg["decay_lambda"])
-    # 1.2: обрезка выбросов
+    # Обрезка выбросов: убираем аномально дорогие продажи
     trimmed = trim_outliers(weighted_pairs, fv_cfg.get("outlier_trim_pct", 0))
-    # 1.1: перцентиль вместо медианы
+    # Взвешенный перцентиль (по умолчанию 50 — ближе к медиане, чем к среднему)
     percentile = fv_cfg.get("fair_value_percentile", 50)
     fair_value = weighted_percentile(trimmed, percentile)
 
@@ -569,6 +646,17 @@ def _compute_fair_value_from_rows(
 def compute_fair_value(
     hconn: sqlite3.Connection, item_id: str, qlt: int | None, ptn: int | None, cfg: dict,
 ) -> FairValueResult:
+    """Считает справедливую цену сегмента (item_id, qlt[, ptn]) по истории продаж.
+
+    Логика:
+    1. «Узкий» сегмент (точный ptn) с фолбэком: если продаж мало, сначала
+       расширяется окно по времени (extended_window_days), затем — до всего
+       бонусного бракета ptn (но никогда за его границы).
+    2. «Широкий» сегмент (весь бракет) — для взвешенной смеси (blend): вес
+       узкого сегмента растёт с объёмом данных.
+    3. Контроль остывания рынка (короткое окно против длинного).
+    4. Ликвидность lambda_per_day — по продажам в отдельном окне.
+    """
     fv_cfg = cfg["fair_value"]
     liq_cfg = cfg["liquidity"]
     table = sanitize_table_name(item_id)
@@ -635,7 +723,7 @@ def compute_fair_value(
     blend_enabled = bool(blend_cfg.get("enabled", True))
     min_weight = float(blend_cfg.get("min_weight", 0.3))
 
-    # Вес узкого сегмента растёт с объёмом данных
+    # Вес узкого сегмента растёт с объёмом данных в нём
     narrow_count = len(narrow_rows)
     wide_count = len(wide_rows)
     if blend_enabled and wide_count > 0:
@@ -664,7 +752,7 @@ def compute_fair_value(
     # Взвешенные цены для S(X): берём из узкого сегмента (основного)
     seg_weighted_prices = _build_weighted_pairs(narrow_rows or wide_rows, fv_cfg["decay_lambda"])
 
-    # Смешиваем
+    # Смешиваем узкий и широкий сегмент (если есть оба)
     if narrow_fv is not None and wide_fv is not None and blend_enabled:
         fair_value = w * narrow_fv + (1 - w) * wide_fv
         segmentation = "blend"
@@ -706,7 +794,9 @@ def compute_fair_value(
                 return _query_segment_sales_bracket(hconn, table, qlt, bracket, window_days, limit)
         return _query_segment_sales(hconn, table, qlt, None, False, window_days, limit)
 
-    # --- 1.3: Контроль остывания рынка ---
+    # --- Контроль остывания рынка ---
+    # Короткое окно (последние дни) против длинного: если короткая fair value
+    # заметно ниже длинной — рынок остывает, сегмент помечается.
     market_cooling = False
     if cooling_cfg.get("enabled", True):
         short_rows = _reseg_sales(
@@ -720,7 +810,8 @@ def compute_fair_value(
                 if drop_pct > cooling_cfg.get("cooling_threshold_pct", 10):
                     market_cooling = True
 
-    # ликвидность считается отдельным окном (liquidity.window_days), той же группировкой
+    # Ликвидность: число продаж в отдельном окне (liquidity.window_days),
+    # той же группировкой, что победила в narrow/wide.
     liq_rows = _reseg_sales(liq_cfg["window_days"], limit=10_000)
     lambda_per_day = len(liq_rows) / max(1, liq_cfg["window_days"])
 
@@ -743,11 +834,12 @@ def recompute_fair_values(
     hconn: sqlite3.Connection, sconn: sqlite3.Connection, cfg: dict,
     item_ids: list[str] | None = None,
 ) -> dict:
-    """Считает fair value по сегментам, встречающимся в активных лотах, и
-    складывает в item_fair_value. Возвращает {(item_id,qlt,ptn): FairValueResult}.
+    """Считает fair value для сегментов, встречающихся в активных лотах, и пишет в кэш.
 
-    Если item_ids задан — считаются только сегменты этих айтемов (частичный
-    пересчёт после опроса конкретных артефактов), остальные не трогаются."""
+    Возвращает {(item_id, qlt, ptn): FairValueResult} и словарь hints
+    «соседний бонусный тир». Если задан item_ids — пересчитываются только
+    сегменты этих предметов (частичный пересчёт), остальные не трогаются.
+    """
     active_conn = sqlite3.connect(ACTIVE_DB, timeout=30)
     active_conn.row_factory = sqlite3.Row
     if item_ids:
@@ -791,9 +883,9 @@ def recompute_fair_values(
     sconn.commit()
     log.info("fair value пересчитан для %d сегментов", len(segments))
 
-    # --- Хинт "соседний бонусный тир" ---
+    # --- Хинт «соседний бонусный тир» ---
     # Для лотов рядом с порогом (например +9 при пороге +10) отдельно
-    # считаем fair value соседнего тира. Чисто информационно, в основной
+    # считаем fair value соседнего тира. Чисто информационно: в основной
     # fair_value/score НЕ подмешивается — см. compute_lot_score.
     hint_cfg = fv_cfg_top(cfg).get("near_threshold_hint", {})
     hints: dict[tuple, dict] = {}
@@ -817,17 +909,20 @@ def recompute_fair_values(
 
 
 def fv_cfg_top(cfg: dict) -> dict:
-    """Короткий помощник — секция fair_value конфига."""
+    """Возвращает секцию 'fair_value' конфига (короткий помощник)."""
     return cfg["fair_value"]
 
 
 # ===========================================================================
-# Блок 2: time-to-sell по конкретной целевой цене
+# Блок 2: time-to-sell — ожидаемое время продажи по целевой цене
 # ===========================================================================
 
 def survival_probability(target_price: float, weighted_prices: list[tuple[float, float]]) -> float:
-    """2.1: S(X) — доля продаж с ценой ≥ X (по накопленному весу).
-    Сортируем от самой дорогой к дешёвой, накапливаем вес."""
+    """S(X) — доля продаж с ценой ≥ X по накопленному весу.
+
+    Чем выше цена, тем меньше таких продаж → ниже вероятность продать.
+    Идём от самой дорогой продажи к дешёвой и накапливаем вес.
+    """
     if not weighted_prices:
         return 0.0
     total = sum(w for _, w in weighted_prices)
@@ -849,25 +944,41 @@ def lambda_at_price(lambda_total: float, s_x: float) -> float:
 
 
 def lambda_effective(lambda_x: float, competitors_below: int) -> float:
-    """2.3: делить λ(X) на (1 + количество активных лотов дешевле X)."""
+    """Поправка на конкурентов: λ делим на (1 + число активных лотов дешевле X).
+
+    Покупатели сначала разбирают более дешёвые аналоги, поэтому с ростом
+    конкуренции ожидаемое время продажи растёт.
+    """
     return lambda_x / (1.0 + competitors_below)
 
 
 def expected_days_to_sell(lambda_eff: float) -> float:
-    """2.4: ожидаемое время продажи (дни) по эффективной лямбде."""
+    """Ожидаемое время продажи в днях по эффективной лямбде: 1 / λ.
+
+    Если лямбда ≤ 0 (продаж нет) — возвращается бесконечность.
+    """
     if lambda_eff <= 0:
         return float("inf")
     return 1.0 / lambda_eff
 
 
 # ===========================================================================
-# Слой 2: score по активным лотам (быстрый, арифметика над кэшем)
+# Слой 2: score по активным лотам (быстрые расчёты над кэшем fair value)
 # ===========================================================================
 
 def compute_lot_score(
     lot: sqlite3.Row, fv: FairValueResult, orderbook_competitors: int, cfg: dict,
     hint: dict | None = None,
 ) -> dict:
+    """Считает score одного лота: профит, ожидаемое время продажи и score.
+
+    Алгоритм: fair value (минус комиссия) − цена лота = абсолютный профит;
+    далее фильтр входа (entry_filter), поправка на конкурентов и целевой цены
+    для time-to-sell, затем формула score (profit_per_hour по умолчанию) и
+    штраф за низкую уверенность. Если лот не прошёл фильтр — score = 0 и
+    reject_reason заполняется причиной. hint — данные «соседнего тира»
+    (чисто информационно, в score не влияет).
+    """
     entry_cfg = cfg["entry_filter"]
     fees_cfg = cfg["fees"]
     ob_cfg = cfg["orderbook"]
@@ -899,8 +1010,7 @@ def compute_lot_score(
         elif ob_cfg["use_current_listings"] and orderbook_competitors >= ob_cfg["ignore_if_competitors_below"]:
             reject_reason = "orderbook_saturated"
 
-    # --- Блок 2: time-to-sell от целевой цены ---
-    # Целевая цена перепродажи (target_price)
+    # --- time-to-sell от целевой цены перепродажи ---
     target_price_mode = tts_cfg.get("target_price_mode", "fair_value")
     if target_price_mode == "buyout":
         target_price = lot_price
@@ -908,7 +1018,7 @@ def compute_lot_score(
         target_price = fair_value
 
     # Конкуренты дешевле target_price (для time-to-sell, не для fair value)
-    competitors_below = orderbook_competitors  # уже посчитано как "дешевле fair_value"
+    competitors_below = orderbook_competitors  # уже посчитано как «дешевле fair_value»
 
     # Базовая лямбда сегмента
     lambda_total = fv.lambda_per_day
@@ -926,7 +1036,7 @@ def compute_lot_score(
     else:
         lambda_eff = lambda_x
 
-    # 2.4: ожидаемое время продажи
+    # 2.4: ожидаемое время продажи (в днях)
     expected_days = expected_days_to_sell(lambda_eff)
 
     if scoring_cfg["formula"] == "profit_only":
@@ -962,7 +1072,7 @@ def compute_lot_score(
         "reject_reason": reject_reason,
         "fetch_run_id": lot["fetch_run_id"],
         "computed_at": utc_now_iso(),
-        # Хинт "соседний бонусный тир" — чисто информационно, не участвует
+        # Хинт «соседний бонусный тир» — чисто информационно: не участвует
         # ни в absolute_profit, ни в score, ни в expected_days_to_sell выше.
         "next_tier_ptn": hint.get("next_ptn") if hint else None,
         "next_tier_price": hint.get("next_price") if hint else None,
@@ -973,12 +1083,19 @@ def recompute_lot_scores(
     sconn: sqlite3.Connection, fair_values: dict, hints: dict, cfg: dict,
     item_ids: list[str] | None = None,
 ) -> int:
+    """Считает score для всех активных лотов и переписывает lot_scores в кэш.
+
+    Для поправки на конкуренцию сначала группирует лоты по сегментам и считает,
+    сколько лотов в каждом сегменте стоят дешевле fair value. Затем считает score
+    каждого лота и переписывает кэш: целиком (если item_ids нет) или только для
+    указанных предметов. Возвращает число обработанных лотов.
+    """
     active_conn = sqlite3.connect(ACTIVE_DB, timeout=30)
     active_conn.row_factory = sqlite3.Row
     lots = load_active_lots(active_conn, item_ids)
     active_conn.close()
 
-    # для orderbook-поправки: сколько активных лотов в каждом сегменте
+    # Для orderbook-поправки: сколько активных лотов в каждом сегменте
     # стоят дешевле соответствующего fair_value (конкуренция по цене)
     segment_lots: dict[tuple, list[int]] = {}
     for lot in lots:
@@ -1000,9 +1117,9 @@ def recompute_lot_scores(
         rows_to_write.append(compute_lot_score(lot, fv, competitors, cfg, hint))
 
     if item_ids:
-        # частичный пересчёт: трогаем только lot_scores этих айтемов,
+        # Частичный пересчёт: трогаем только lot_scores этих предметов,
         # остальные (посчитанные ранее) не удаляем. DELETE+INSERT ниже —
-        # один implicit-транзакшн sqlite3 до commit(), как и раньше.
+        # один implicit-транзакшн sqlite3 до commit().
         placeholders = ",".join("?" * len(item_ids))
         sconn.execute(f"DELETE FROM lot_scores WHERE item_id IN ({placeholders})", item_ids)
     else:
